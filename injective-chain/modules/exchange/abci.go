@@ -11,6 +11,7 @@ import (
 	downtimetypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/downtime-detector/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/fba"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper"
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
@@ -55,6 +56,7 @@ func (h *BlockHandler) BeginBlocker(ctx sdk.Context) {
 	if params.FixedGasEnabled != h.k.IsFixedGasEnabled() {
 		h.k.SetFixedGasEnabled(params.FixedGasEnabled)
 	}
+
 }
 
 func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
@@ -64,18 +66,27 @@ func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
 	ctx = ctx.WithGasMeter(chaintypes.NewThreadsafeInfiniteGasMeter()).
 		WithBlockGasMeter(chaintypes.NewThreadsafeInfiniteGasMeter())
 
-	/* =========== Stage 1: Process conditional orders and market orders =========== */
+	// =========== Pre-matching: Trigger conditional market orders ===========
 
 	// Process Conditional Market orders first
 	triggeredMarketsAndOrders, marketCache := h.k.GetAllTriggeredConditionalOrders(ctx)
 	h.handleConditionalMarketOrderCancels(ctx, triggeredMarketsAndOrders)
 	h.handleTriggeringConditionalMarketOrders(ctx, triggeredMarketsAndOrders)
 
+	// =========== Pre-FBA: Cancel paused transient orders ===========
+	// Must happen before FBA stages to avoid store mutations during parallel execution
+	// that would stale derivative cross-margin risk snapshots, and to prevent paused
+	// transient derivative orders from being promoted to resting during post-match processing.
+	h.k.CancelPausedTransientSpotOrders(ctx)
+	h.k.CancelPausedTransientDerivativeOrders(ctx)
+
+	// =========== Stage 1: Process market orders in parallel ===========
+
 	stakingInfo := h.k.InitialFetchAndUpdateActiveAccountFeeDiscountStakingInfo(ctx)
 	spotVwapData := v2.NewSpotVwapInfo()
 
 	// Create FBA batch auction for this block execution
-	batchAuction := fba.NewBatchAuction(*h.k.SpotKeeper, *h.k.DerivativeKeeper)
+	batchAuction := fba.NewBatchAuction(*h.k.SpotKeeper, *h.k.DerivativeKeeper, h.k.BuildDerivativeStageRiskPrepass)
 
 	// Get market order indicators
 	spotMarketOrderIndicators := h.k.GetAllTransientSpotMarketOrderIndicators(ctx)
@@ -116,6 +127,9 @@ func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
 	// Persist Spot market order execution data
 	tradingRewards := h.k.PersistSpotMarketOrderExecution(ctx, batchSpotExecutionData, spotVwapData)
 
+	// Cancel/refund spot market orders for markets where the FBA goroutine panicked (nil result).
+	h.cleanupTransientSpotMarketOrders(ctx, batchSpotExecutionData, spotMarketOrderIndicators)
+
 	// Process triggering conditional limit orders
 	h.handleConditionalLimitOrderCancels(ctx, triggeredMarketsAndOrders)
 	h.handleTriggeringConditionalLimitOrders(ctx, triggeredMarketsAndOrders)
@@ -124,9 +138,37 @@ func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
 	derivativeVwapData := v2.NewDerivativeVwapInfo()
 
 	// Persist Derivative market order execution data
-	tradingRewards = h.k.PersistDerivativeMarketOrderExecution(
+	var insolventMarkets map[common.Hash]struct{}
+	tradingRewards, insolventMarkets = h.k.PersistDerivativeMarketOrderExecution(
 		ctx, batchDerivativeExecutionData, derivativeVwapData, tradingRewards, modifiedPositionCache,
 	)
+
+	// Remove consumed market orders from transient storage so subsequent stages (e.g.
+	// stage 3 limit-order last-look) don't double-count their exposure.
+	h.cleanupTransientDerivativeMarketOrders(ctx, batchDerivativeExecutionData, derivativeMarketOrderDirections, insolventMarkets)
+
+	// Re-fetch after market-order execution and conditional limit-order triggering,
+	// since new market directions may have been added.
+	derivativeLimitOrderMarketDirections = h.k.GetAllTransientDerivativeMarketDirections(ctx, true)
+
+	// Refresh the modified-position cache for any markets that were added after
+	// conditional-limit triggering. Without this, reduce-only conflict pruning in
+	// GetFilteredTransientOrdersAndOrdersToCancel would be skipped for these
+	// markets (HasAnyModifiedPositionsInMarket would return false).
+	for _, m := range derivativeLimitOrderMarketDirections {
+		if modifiedPositionCache.HasAnyModifiedPositionsInMarket(m.MarketId) {
+			continue
+		}
+
+		subaccountIDs := h.k.GetModifiedSubaccountsByMarket(ctx, m.MarketId)
+		if subaccountIDs == nil || len(subaccountIDs.SubaccountIds) == 0 {
+			continue
+		}
+
+		for _, subaccountID := range subaccountIDs.SubaccountIds {
+			modifiedPositionCache.SetPositionIndicator(m.MarketId, common.BytesToHash(subaccountID))
+		}
+	}
 
 	/* =========== Stage 3: Process all limit orders in parallel =========== */
 
@@ -147,6 +189,16 @@ func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
 
 	// Persist Derivative Limit order matching execution data
 	tradingRewards = h.k.PersistDerivativeMatchingExecution(ctx, batchDerivativeMatchingExecutionData, derivativeVwapData, tradingRewards)
+
+	// Clean up transient limit orders for markets that were skipped due to panic (nil execution
+	// data). Unlike stage-1 market orders which have cleanupTransientDerivativeMarketOrders,
+	// stage-3 limit orders previously had no fail-closed cleanup — a panic would silently strand
+	// locked margin and stale orderbook metadata. The insolvency case is handled inside
+	// PersistDerivativeMatchingExecution itself.
+	h.cleanupTransientLimitOrders(ctx,
+		batchSpotMatchingExecutionData, spotLimitOrderMarketDirections,
+		batchDerivativeMatchingExecutionData, derivativeLimitOrderMarketDirections,
+	)
 
 	/* =========== Stage 5: Update perpetual market funding info =========== */
 
@@ -201,6 +253,159 @@ func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
 	h.k.IncrementSequenceAndEmitAllTransientOrderbookUpdates(ctx)
 }
 
+// cleanupTransientSpotMarketOrders cancels and refunds transient spot market orders for markets
+// where the FBA goroutine panicked (nil execution data). Without this, a recovered panic would
+// drop the orders at block end but their balance holds would never be refunded.
+func (h *BlockHandler) cleanupTransientSpotMarketOrders(
+	ctx sdk.Context,
+	batchData []*v2.SpotBatchExecutionData,
+	indicators []*v2.MarketOrderIndicator,
+) {
+	defer h.k.Meter(ctx).FuncTiming(&ctx, "cleanupTransientSpotMarketOrders")()
+
+	for i, execData := range batchData {
+		if execData != nil {
+			continue // successfully processed — PersistSpotMarketOrderExecution handles cleanup
+		}
+
+		if i >= len(indicators) || indicators[i] == nil {
+			continue
+		}
+
+		marketID := common.HexToHash(indicators[i].MarketId)
+		market := h.k.GetSpotMarketByID(ctx, marketID)
+		if market == nil {
+			continue
+		}
+
+		// Cancel all transient spot market orders in this market (both directions).
+		for _, isBuy := range []bool{true, false} {
+			orders := h.k.GetAllTransientSpotMarketOrders(ctx, marketID, isBuy)
+			for _, order := range orders {
+				h.k.CancelTransientSpotMarketOrder(ctx, market, marketID, order)
+			}
+		}
+	}
+}
+
+// cleanupTransientDerivativeMarketOrders removes transient market orders after stage-1.
+// This is intentionally in the FBA batch path (not inside the persistence function) because
+// PersistSingleDerivativeMarketOrderExecution is also used by immediate execution paths
+// (atomic orders, liquidations) which must not delete unrelated queued market orders.
+//
+// When a market is disabled or has no mark price, executeDerivativeMarketOrder returns nil.
+// We must still delete the transient market orders for that market, otherwise stage-3
+// cross-margin risk calculations will see unmatchable leftovers that inflate OLR or trigger
+// oracle-failure paths. The directions slice provides the marketID for nil entries.
+func (h *BlockHandler) cleanupTransientDerivativeMarketOrders(
+	ctx sdk.Context,
+	batchData []*v2.DerivativeBatchExecutionData,
+	directions []*types.MatchedMarketDirection,
+	insolventMarkets map[common.Hash]struct{},
+) {
+	defer h.k.Meter(ctx).FuncTiming(&ctx, "cleanupTransientDerivativeMarketOrders")()
+
+	for i, execData := range batchData {
+		var marketID common.Hash
+		switch {
+		case execData != nil:
+			marketID = execData.Market.MarketID()
+		case i < len(directions) && directions[i] != nil:
+			marketID = directions[i].MarketId
+		default:
+			continue
+		}
+
+		if execData == nil {
+			// Market was disabled or had no mark price — orders were never matched.
+			// Cancel with refund instead of bare deletion to avoid losing margin holds.
+			h.k.CancelUnprocessedTransientDerivativeMarketOrders(ctx, marketID)
+		} else if _, insolvent := insolventMarkets[marketID]; insolvent {
+			// Market was matched but found insolvent during persistence. PersistSingleDerivativeMarketOrderExecution
+			// returned early without applying deposit deltas (including refunds for unfilled orders),
+			// so individual order margins are still locked. Cancel with refund to release them.
+			h.k.CancelUnprocessedTransientDerivativeMarketOrders(ctx, marketID)
+		} else {
+			// Orders were processed during matching — just clean up the transient store.
+			h.k.DeleteConsumedTransientDerivativeMarketOrders(ctx, marketID)
+		}
+	}
+}
+
+// cleanupTransientLimitOrders cancels transient limit orders for markets where stage-3 FBA
+// matching returned nil (panic recovery). Without this, a goroutine panic would silently strand
+// locked margin (derivative) and balance holds (spot), and leave orderbook metadata stale.
+// The insolvency case for derivatives is handled inside PersistDerivativeMatchingExecution.
+func (h *BlockHandler) cleanupTransientLimitOrders(
+	ctx sdk.Context,
+	batchSpotData []*v2.SpotBatchExecutionData,
+	spotDirections []*types.MatchedMarketDirection,
+	batchDerivativeData []*v2.DerivativeBatchExecutionData,
+	derivativeDirections []*types.MatchedMarketDirection,
+) {
+	defer h.k.Meter(ctx).FuncTiming(&ctx, "cleanupTransientLimitOrders")()
+
+	h.cleanupPanickedDerivativeLimitOrders(ctx, batchDerivativeData, derivativeDirections)
+	h.cleanupPanickedSpotLimitOrders(ctx, batchSpotData, spotDirections)
+}
+
+func (h *BlockHandler) cleanupPanickedDerivativeLimitOrders(
+	ctx sdk.Context,
+	batchData []*v2.DerivativeBatchExecutionData,
+	directions []*types.MatchedMarketDirection,
+) {
+	for i, execData := range batchData {
+		if execData != nil || i >= len(directions) || directions[i] == nil {
+			continue
+		}
+
+		marketID := directions[i].MarketId
+		// Use GetDerivativeMarketByID to find both enabled and disabled markets.
+		// The mark-price-requiring lookup would skip disabled/no-oracle markets,
+		// stranding transient orders without refund.
+		var market v2.DerivativeMarketI
+		if m := h.k.GetDerivativeMarketByID(ctx, marketID); m != nil {
+			market = m
+		} else if m := h.k.GetBinaryOptionsMarketByID(ctx, marketID); m != nil {
+			market = m
+		}
+		if market == nil {
+			continue
+		}
+
+		ctx.Logger().Error("stage-3 derivative limit matching returned nil — cancelling transient orders with refund",
+			"marketID", marketID.Hex(),
+		)
+		h.k.CancelAllTransientDerivativeLimitOrders(ctx, market)
+	}
+}
+
+func (h *BlockHandler) cleanupPanickedSpotLimitOrders(
+	ctx sdk.Context,
+	batchData []*v2.SpotBatchExecutionData,
+	directions []*types.MatchedMarketDirection,
+) {
+	for i, execData := range batchData {
+		if execData != nil || i >= len(directions) || directions[i] == nil {
+			continue
+		}
+
+		marketID := directions[i].MarketId
+		market := h.k.GetSpotMarket(ctx, marketID, true)
+		if market == nil {
+			market = h.k.GetSpotMarket(ctx, marketID, false) // try disabled markets
+		}
+		if market == nil {
+			continue
+		}
+
+		ctx.Logger().Error("stage-3 spot limit matching returned nil — cancelling transient orders with refund",
+			"marketID", marketID.Hex(),
+		)
+		h.k.CancelAllTransientSpotLimitOrdersForMarket(ctx, market)
+	}
+}
+
 func (h *BlockHandler) handleConditionalMarketOrderCancels(ctx sdk.Context, triggeredMarketsAndOrders []*v2.TriggeredOrdersInMarket) {
 	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.handleConditionalMarketOrderCancels")()
 	// cancel conditional orders first on ctx so we can trigger them on separate cacheCtx
@@ -217,6 +422,14 @@ func (h *BlockHandler) cancelTriggeredMarketOrdersForMarket(ctx sdk.Context, tri
 	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.cancelTriggeredMarketOrdersForMarket")()
 
 	for i, marketOrder := range triggeredMarket.MarketOrders {
+		// Skip CM-paused subaccounts: the order stays as a conditional in state and will
+		// re-trigger naturally when the pause is lifted. Deleting it here would permanently
+		// lose the order since the subsequent creation attempt would also fail.
+		if h.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, marketOrder.OrderInfo.SubaccountID()) != nil {
+			triggeredMarket.MarketOrders[i] = nil
+			continue
+		}
+
 		if err := h.k.CancelConditionalDerivativeMarketOrder(
 			ctx, triggeredMarket.Market, marketOrder.OrderInfo.SubaccountID(), nil, marketOrder.Hash(),
 		); err != nil {
@@ -321,6 +534,7 @@ func triggerMarketOrderWithCache(
 				Cid:          marketOrder.OrderInfo.Cid,
 			},
 		)
+		return // don't commit partial/failed creation state
 	}
 	writeCache()
 }
@@ -365,6 +579,14 @@ func (h *BlockHandler) cancelConditionalOrdersForMarket(ctx sdk.Context, trigger
 	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.cancelConditionalOrdersForMarket")()
 
 	for i, limitOrder := range triggeredMarket.LimitOrders {
+		// Skip CM-paused subaccounts: the order stays as a conditional in state and will
+		// re-trigger naturally when the pause is lifted. Deleting it here would permanently
+		// lose the order since the subsequent creation attempt would also fail.
+		if h.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, limitOrder.OrderInfo.SubaccountID()) != nil {
+			triggeredMarket.LimitOrders[i] = nil
+			continue
+		}
+
 		if err := h.k.CancelConditionalDerivativeLimitOrder(
 			ctx, triggeredMarket.Market, limitOrder.OrderInfo.SubaccountID(), nil, limitOrder.Hash(),
 		); err != nil {
@@ -374,6 +596,14 @@ func (h *BlockHandler) cancelConditionalOrdersForMarket(ctx sdk.Context, trigger
 			ctx.Logger().Debug("Cancelling of conditional limit order failed: ", err.Error())
 		}
 	}
+
+	// NOTE: we intentionally do NOT delete the transient limit-order indicators here.
+	// updateTransientOrderIndicators already set them based on HasLimit*Orders flags.
+	// If all triggered conditionals were paused, the stale indicator causes an unnecessary
+	// but harmless stage-3 FBA run that correctly matches any crossing resting orders.
+	// Deleting the indicator would be unsafe: it's keyed by (marketID, side) and would
+	// also suppress stage-3 processing for unrelated transient limit orders placed earlier
+	// in the block on the same market/side.
 }
 
 func (h *BlockHandler) handleTriggeringConditionalLimitOrders(ctx sdk.Context, triggeredMarketsAndOrders []*v2.TriggeredOrdersInMarket) {
@@ -445,6 +675,7 @@ func triggerLimitOrderWithCache(
 				Cid:          limitOrder.OrderInfo.Cid,
 			},
 		)
+		return // don't commit partial/failed creation state
 	}
 	writeCache()
 }

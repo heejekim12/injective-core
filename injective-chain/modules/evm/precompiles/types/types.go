@@ -10,7 +10,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
-func CastAddress(input interface{}) (sdk.AccAddress, error) {
+func CastAddress(input any) (sdk.AccAddress, error) {
 	ethAddr, ok := input.(common.Address)
 	if !ok {
 		return sdk.AccAddress{}, errors.New("could not cast input to address")
@@ -18,7 +18,7 @@ func CastAddress(input interface{}) (sdk.AccAddress, error) {
 	return sdk.AccAddress(ethAddr.Bytes()), nil
 }
 
-func CastString(input interface{}) (string, error) {
+func CastString(input any) (string, error) {
 	res, ok := input.(string)
 	if !ok {
 		return "", errors.New("could not cast input to string")
@@ -26,7 +26,7 @@ func CastString(input interface{}) (string, error) {
 	return res, nil
 }
 
-func CastStringArray(input interface{}) ([]string, error) {
+func CastStringArray(input any) ([]string, error) {
 	res, ok := input.([]string)
 	if !ok {
 		return nil, errors.New("could not cast input to string array")
@@ -34,7 +34,7 @@ func CastStringArray(input interface{}) ([]string, error) {
 	return res, nil
 }
 
-func CastBigInt(input interface{}) (*big.Int, error) {
+func CastBigInt(input any) (*big.Int, error) {
 	res, ok := input.(*big.Int)
 	if !ok {
 		return nil, errors.New("could not cast input to big.Int")
@@ -42,7 +42,15 @@ func CastBigInt(input interface{}) (*big.Int, error) {
 	return res, nil
 }
 
-func CastUint32(input interface{}) (uint32, error) {
+func CastUint8(input any) (uint8, error) {
+	res, ok := input.(uint8)
+	if !ok {
+		return 0, errors.New("could not cast input to uint8")
+	}
+	return res, nil
+}
+
+func CastUint32(input any) (uint32, error) {
 	res, ok := input.(uint32)
 	if !ok {
 		return 0, errors.New("could not cast input to uint32")
@@ -50,7 +58,7 @@ func CastUint32(input interface{}) (uint32, error) {
 	return res, nil
 }
 
-func CastInt32(input interface{}) (int32, error) {
+func CastInt32(input any) (int32, error) {
 	res, ok := input.(int32)
 	if !ok {
 		return 0, errors.New("could not cast input to int32")

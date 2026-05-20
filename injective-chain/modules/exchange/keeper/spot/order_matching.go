@@ -608,6 +608,8 @@ func (k SpotKeeper) PersistSingleSpotMarketOrderExecution(
 			baseDenom,
 			execution.BaseDenomDepositDeltas[subaccountID],
 		)
+		// Evict stale cross-pool snapshot: base-denom balance change can affect cross equity.
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 	}
 	for _, subaccountID := range execution.QuoteDenomDepositSubaccountIDs {
 		k.subaccount.UpdateDepositWithDelta(
@@ -616,6 +618,8 @@ func (k SpotKeeper) PersistSingleSpotMarketOrderExecution(
 			quoteDenom,
 			execution.QuoteDenomDepositDeltas[subaccountID],
 		)
+		// Evict stale cross-pool snapshot: quote-denom balance feeds into cross equity.
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 	}
 
 	for _, limitOrderDelta := range execution.LimitOrderFilledDeltas {
@@ -843,10 +847,12 @@ func (k SpotKeeper) PersistSpotMatchingExecution( //nolint:revive // ok
 
 		for _, subaccountID := range execution.BaseDenomDepositSubaccountIDs {
 			k.subaccount.UpdateDepositWithDelta(ctx, subaccountID, baseDenom, execution.BaseDenomDepositDeltas[subaccountID])
+			k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 		}
 
 		for _, subaccountID := range execution.QuoteDenomDepositSubaccountIDs {
 			k.subaccount.UpdateDepositWithDelta(ctx, subaccountID, quoteDenom, execution.QuoteDenomDepositDeltas[subaccountID])
+			k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 		}
 
 		if execution.NewOrdersEvent != nil {

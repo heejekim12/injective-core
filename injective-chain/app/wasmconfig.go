@@ -1,12 +1,6 @@
 package app
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/spf13/cast"
-
-	servertypes "github.com/cosmos/cosmos-sdk/server/types"
-
-	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 )
 
@@ -24,13 +18,4 @@ var (
 // produce a list of enabled proposals to pass into wasmd app.
 func GetEnabledProposals() []wasmtypes.ProposalType {
 	return wasmtypes.EnableAllProposals
-}
-
-func GetWasmOpts(appOpts servertypes.AppOptions) []wasmkeeper.Option {
-	wasmOpts := make([]wasmkeeper.Option, 0)
-	if cast.ToBool(appOpts.Get("telemetry.enabled")) {
-		wasmOpts = append(wasmOpts, wasmkeeper.WithVMCacheMetrics(prometheus.DefaultRegisterer))
-	}
-
-	return wasmOpts
 }

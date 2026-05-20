@@ -8,6 +8,7 @@ import (
 	"cosmossdk.io/log"
 	storetypes "cosmossdk.io/store/types"
 	upgradetypes "cosmossdk.io/x/upgrade/types"
+	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	authzkeeper "github.com/cosmos/cosmos-sdk/x/authz/keeper"
@@ -124,6 +125,7 @@ func (s *UpgradeHandlerStep) recoverPanic(logger log.Logger, errOut *error) {
 // InjectiveApplication is an interface that defines the methods from InjectiveApp that are needed by the upgrade handlers
 // This is required to avoid a circular dependency between the app and the upgrade handlers
 type InjectiveApplication interface {
+	AppCodec() codec.Codec
 	ChainID() string
 	GetExchangeKeeper() *exchangekeeper.Keeper
 	GetBankKeeper() bankkeeper.Keeper

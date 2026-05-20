@@ -17,7 +17,7 @@ var (
 	MsgCreateDerivativeLimitOrderGas         = storetypes.Gas(120_000)
 	MsgCreateDerivativeLimitPostOnlyOrderGas = storetypes.Gas(140_000)
 	MsgCreateDerivativeMarketOrderGas        = storetypes.Gas(105_000)
-	MsgCancelDerivativeOrderGas              = storetypes.Gas(70_000)
+	MsgCancelDerivativeOrderGas              = storetypes.Gas(71_000)
 
 	MsgCreateSpotLimitOrderGas         = storetypes.Gas(100_000)
 	MsgCreateSpotLimitPostOnlyOrderGas = storetypes.Gas(120_000)
@@ -32,12 +32,32 @@ var (
 	MsgCreateBinaryOptionsMarketOrderGas        = MsgCreateDerivativeMarketOrderGas
 	MsgCancelBinaryOptionsOrderGas              = MsgCancelDerivativeOrderGas
 
-	MsgDepositGas                = storetypes.Gas(38_000)
-	MsgWithdrawGas               = storetypes.Gas(35_000)
-	MsgSubaccountTransferGas     = storetypes.Gas(15_000)
-	MsgExternalTransferGas       = storetypes.Gas(40_000)
-	MsgIncreasePositionMarginGas = storetypes.Gas(51_000)
-	MsgDecreasePositionMarginGas = storetypes.Gas(60_000)
+	MsgDepositGas = storetypes.Gas(38_000)
+	// Withdraw, transfer, and margin messages now run cross-margin maintenance/admission checks
+	// that build pool snapshots (iterating active markets and orders). Keep these conservatively
+	// priced to avoid underpricing heavy execution in fixed-gas mode.
+	MsgWithdrawGas = storetypes.Gas(120_000)
+	// Risk profile switching (isolated→cross) iterates all derivative orders to release per-order holds.
+	// Base gas covers the fixed overhead; per-order gas scales with actual order count.
+	// Gas is determined inside the msg server (like MsgBatchCancel*), not via DetermineGas.
+	MsgUpdateSubaccountRiskProfileGas = storetypes.Gas(125_000)
+	PerOrderHoldReleaseGas            = storetypes.Gas(5_000)
+	MsgSubaccountTransferGas          = storetypes.Gas(100_000)
+	MsgExternalTransferGas            = storetypes.Gas(100_000)
+	MsgIncreasePositionMarginGas          = storetypes.Gas(65_000)
+	MsgDecreasePositionMarginGas          = storetypes.Gas(80_000)
+	MsgLiquidateCrossMarginPoolGas        = storetypes.Gas(500_000)
+
+	// SpotMarketScanGas is the per-market gas cost for the global spot market scan during
+	// cross-pool liquidation cancel-first. cancelAllSpotOrdersLockingDenom iterates all spot
+	// markets (no per-subaccount index exists for spot orders), so this charges for the
+	// iteration itself, not just for orders actually cancelled.
+	SpotMarketScanGas = storetypes.Gas(1_000)
+
+	// CrossPoolPerPositionCloseGas is the per-position gas charge for closePoolPositions
+	// during cross-pool liquidation. Each position close involves market order creation,
+	// matching via ExecuteDerivativeMarketOrderImmediately, and balance updates.
+	CrossPoolPerPositionCloseGas = storetypes.Gas(200_000)
 )
 
 //nolint:revive //this is fine
@@ -121,6 +141,8 @@ func DetermineGas(msg sdk.Msg) uint64 {
 		return MsgDepositGas
 	case *v2.MsgWithdraw:
 		return MsgWithdrawGas
+	case *v2.MsgUpdateSubaccountRiskProfile:
+		panic("developer error: MsgUpdateSubaccountRiskProfile gas already determined in msg server impl")
 	case *v2.MsgSubaccountTransfer:
 		return MsgSubaccountTransferGas
 	case *v2.MsgExternalTransfer:
@@ -129,6 +151,8 @@ func DetermineGas(msg sdk.Msg) uint64 {
 		return MsgIncreasePositionMarginGas
 	case *v2.MsgDecreasePositionMargin:
 		return MsgDecreasePositionMarginGas
+	case *v2.MsgLiquidateCrossMarginPool:
+		return MsgLiquidateCrossMarginPoolGas
 	default:
 		panic(fmt.Sprintf("developer error: unknown message type: %T", msg))
 	}

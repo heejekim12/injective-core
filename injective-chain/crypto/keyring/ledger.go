@@ -203,15 +203,6 @@ func GetEIP712TypedDataV2(signDocBytes []byte) (typeddata.TypedData, error) { //
 		chainID = 11155111
 	}
 
-	// construct the eip712 v2
-	domain := typeddata.TypedDataDomain{
-		Name:              "Injective Web3",
-		Version:           "1.0.0",
-		ChainId:           ethmath.NewHexOrDecimal256(chainID),
-		VerifyingContract: "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC",
-		Salt:              "0",
-	}
-
 	msgsJsons := make([]json.RawMessage, len(signMsg.Msgs))
 	for idx, m := range signMsg.Msgs {
 		bzMsg, err := ante.GlobalCdc.MarshalInterfaceJSON(m)
@@ -230,12 +221,9 @@ func GetEIP712TypedDataV2(signDocBytes []byte) (typeddata.TypedData, error) { //
 	feeInfo := legacytx.StdFee{
 		Amount: signMsg.Fee.Amount,
 		Gas:    signMsg.Fee.Gas,
+		Payer:  signMsg.Fee.Payer,
+		// Granter: signMsg.Fee.Granter, // eip712_cosmos.go does not include Granter
 	}
-
-	// there's never a fee payer with Ledger signing
-	// if opts.FeePayer != nil {
-	// 	feeInfo.Payer = opts.FeePayer.String()
-	// }
 
 	bzFee, err := json.Marshal(feeInfo)
 	if err != nil {
@@ -254,6 +242,15 @@ func GetEIP712TypedDataV2(signDocBytes []byte) (typeddata.TypedData, error) { //
 	bzTxContext, err := json.Marshal(ctx)
 	if err != nil {
 		return typeddata.TypedData{}, fmt.Errorf("marshal json err: %w", err)
+	}
+
+	// construct the eip712 v2
+	domain := typeddata.TypedDataDomain{
+		Name:              "Injective Web3",
+		Version:           "1.0.0",
+		ChainId:           ethmath.NewHexOrDecimal256(chainID),
+		VerifyingContract: "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC",
+		Salt:              "0",
 	}
 
 	td := typeddata.TypedData{

@@ -32,26 +32,93 @@ func (k DerivativeKeeper) ExecuteDerivativeMarketParamUpdateProposal(ctx sdk.Con
 	k.handleMakerFeeRateChange(ctx, marketID, prevMarket.MakerFeeRate, p.MakerFeeRate, prevMarket)
 	k.handleTakerFeeRateChange(ctx, marketID, prevMarket.TakerFeeRate, p.TakerFeeRate, prevMarket)
 
+	initialMarginRatio := p.InitialMarginRatio
+	maintenanceMarginRatio := p.MaintenanceMarginRatio
+	reduceMarginRatio := p.ReduceMarginRatio
+	makerFeeRate := p.MakerFeeRate
+	takerFeeRate := p.TakerFeeRate
+	relayerFeeShareRate := p.RelayerFeeShareRate
+	minPriceTickSize := p.MinPriceTickSize
+	minQuantityTickSize := p.MinQuantityTickSize
+	minNotional := p.MinNotional
+	openNotionalCap := p.OpenNotionalCap
+	status := p.Status
+	ticker := p.Ticker
+	adminInfo := p.AdminInfo
+	// Eligibility-only proposals (the shape the --cross-margin-eligible CLI flag
+	// alone produces) pass ValidateBasic but otherwise hit the nil-required-field
+	// errors and nil/zero-value overwrites inside UpdateDerivativeMarketParam
+	// (ratios/cap return an error, fee/tick pointers panic on deref, status and
+	// ticker get wiped, admin is cleared). Backfill untouched fields from the
+	// current market only when CrossMarginEligibility is the trigger so the
+	// legacy proposal shape (no eligibility change) keeps its original contract.
+	if p.CrossMarginEligibility != v2.CrossMarginEligibility_CM_ELIGIBILITY_UNSPECIFIED {
+		if initialMarginRatio == nil {
+			initialMarginRatio = &prevMarket.InitialMarginRatio
+		}
+		if maintenanceMarginRatio == nil {
+			maintenanceMarginRatio = &prevMarket.MaintenanceMarginRatio
+		}
+		if reduceMarginRatio == nil {
+			reduceMarginRatio = &prevMarket.ReduceMarginRatio
+		}
+		if makerFeeRate == nil {
+			makerFeeRate = &prevMarket.MakerFeeRate
+		}
+		if takerFeeRate == nil {
+			takerFeeRate = &prevMarket.TakerFeeRate
+		}
+		if relayerFeeShareRate == nil {
+			relayerFeeShareRate = &prevMarket.RelayerFeeShareRate
+		}
+		if minPriceTickSize == nil {
+			minPriceTickSize = &prevMarket.MinPriceTickSize
+		}
+		if minQuantityTickSize == nil {
+			minQuantityTickSize = &prevMarket.MinQuantityTickSize
+		}
+		if minNotional == nil {
+			minNotional = &prevMarket.MinNotional
+		}
+		if openNotionalCap == nil {
+			openNotionalCap = &prevMarket.OpenNotionalCap
+		}
+		if status == v2.MarketStatus_Unspecified {
+			status = prevMarket.Status
+		}
+		if ticker == "" {
+			ticker = prevMarket.Ticker
+		}
+		// Treat a zero-valued AdminInfo{} the same as nil: non-CLI callers (e.g. programmatic
+		// proposals) may send an empty struct rather than omitting the field, and without this
+		// check it would propagate to UpdateDerivativeMarketParam and wipe the admin.
+		isZeroAdminInfo := adminInfo == nil || (adminInfo.Admin == "" && adminInfo.AdminPermissions == 0)
+		if isZeroAdminInfo {
+			adminInfo = &v2.AdminInfo{Admin: prevMarket.Admin, AdminPermissions: prevMarket.AdminPermissions}
+		}
+	}
+
 	if err := k.UpdateDerivativeMarketParam(
 		ctx,
 		common.HexToHash(p.MarketId),
-		p.InitialMarginRatio,
-		p.MaintenanceMarginRatio,
-		p.ReduceMarginRatio,
-		p.MakerFeeRate,
-		p.TakerFeeRate,
-		p.RelayerFeeShareRate,
-		p.MinPriceTickSize,
-		p.MinQuantityTickSize,
-		p.MinNotional,
+		initialMarginRatio,
+		maintenanceMarginRatio,
+		reduceMarginRatio,
+		makerFeeRate,
+		takerFeeRate,
+		relayerFeeShareRate,
+		minPriceTickSize,
+		minQuantityTickSize,
+		minNotional,
 		p.HourlyInterestRate,
 		p.HourlyFundingRateCap,
-		p.OpenNotionalCap,
+		openNotionalCap,
 		p.HasDisabledMinimalProtocolFee,
-		p.Status,
+		p.CrossMarginEligibility,
+		status,
 		p.OracleParams,
-		p.Ticker,
-		p.AdminInfo,
+		ticker,
+		adminInfo,
 	); err != nil {
 		return errors.Wrap(err, "UpdateDerivativeMarketParam failed during ExecuteDerivativeMarketParamUpdateProposal")
 	}
@@ -128,11 +195,17 @@ func (k DerivativeKeeper) HandleDerivativeFeeDecrease(
 			continue
 		}
 
+		subaccountID := order.GetSubaccountID()
+
+		// Cross-margin subaccounts have no per-order fee holds, so there is nothing to refund.
+		if profile, _ := k.RiskEngine().EffectiveProfile(ctx, subaccountID); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+			continue
+		}
+
 		// nolint:all
 		// FeeRefund = (PreviousMakerFeeRate - NewMakerFeeRate) * FillableQuantity * Price
 		// AvailableBalance += FeeRefund
 		feeRefund := feeRefundRate.Mul(order.GetFillable()).Mul(order.GetPrice())
-		subaccountID := order.GetSubaccountID()
 		chainFormatRefund := market.NotionalToChainFormat(feeRefund)
 		k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, market.GetQuoteDenom(), chainFormatRefund)
 	}
@@ -155,6 +228,11 @@ func (k DerivativeKeeper) handleDerivativeFeeDecreaseForConditionals(
 	feeRefundRate := math.LegacyMinDec(prevFeeRate, prevFeeRate.Sub(newFeeRate)) // negative newFeeRate part is ignored
 	var decreaseRate = func(order types.IDerivativeOrder) {
 		if order.IsReduceOnly() {
+			return
+		}
+
+		// Cross-margin subaccounts have no per-order fee holds, so there is nothing to refund.
+		if profile, _ := k.RiskEngine().EffectiveProfile(ctx, order.GetSubaccountID()); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
 			return
 		}
 
@@ -232,6 +310,11 @@ func (k DerivativeKeeper) tryChargeExtraFeeForDerivativeOrder(
 		return true
 	}
 
+	// Cross-margin subaccounts have no per-order fee holds, so no extra fee should be charged.
+	if profile, _ := k.RiskEngine().EffectiveProfile(ctx, subaccountID); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+		return true
+	}
+
 	// ExtraFee = (newFeeRate - prevFeeRate) * FillableQuantity * Price
 	// AvailableBalance -= ExtraFee
 	// If AvailableBalance < ExtraFee, cancel the order
@@ -293,13 +376,24 @@ func (k DerivativeKeeper) processOrderForFeeIncrease(
 		return
 	}
 
+	subaccountID := order.SubaccountID()
+
+	// Cross-margin subaccounts have no per-order fee holds, so no extra fee should be charged.
+	// The increased fee will be reflected in OLR at matching time via last-look pruning.
+	// On quiet markets this means inadmissible orders can persist until the next match or
+	// user-initiated cancel, but the pool is correctly evaluated (snapshot cache validates
+	// fee rates, so fresh builds use the new fee). Evicting the cache here ensures any
+	// stale snapshot from earlier in the block is discarded.
+	if profile, _ := k.RiskEngine().EffectiveProfile(ctx, subaccountID); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+		return
+	}
+
 	// ExtraFee = (NewMakerFeeRate - PreviousMakerFeeRate) * FillableQuantity * Price
 	// AvailableBalance -= ExtraFee
 	// If AvailableBalance < ExtraFee, Cancel the order
 	extraFee := feeChargeRate.Mul(order.Fillable).Mul(order.OrderInfo.Price)
 	chainFormatExtraFee := prevMarket.NotionalToChainFormat(extraFee)
-
-	subaccountID := order.SubaccountID()
 
 	hasSufficientFundsToPayExtraFee := k.subaccount.HasSufficientFunds(ctx, subaccountID, denom, chainFormatExtraFee)
 
@@ -366,6 +460,7 @@ func (k DerivativeKeeper) UpdateDerivativeMarketParam(
 	minQuantityTickSize, minNotional, hourlyInterestRate, hourlyFundingRateCap *math.LegacyDec,
 	openNotionalCap *v2.OpenNotionalCap,
 	hasDisabledMinimalProtocolFeeUpdate v2.DisableMinimalProtocolFeeUpdate,
+	crossMarginEligibility v2.CrossMarginEligibility,
 
 	status v2.MarketStatus,
 	oracleParams *v2.OracleParams,
@@ -419,6 +514,10 @@ func (k DerivativeKeeper) UpdateDerivativeMarketParam(
 	market.OpenNotionalCap = *openNotionalCap
 	market.Status = status
 	market.Ticker = ticker
+
+	if crossMarginEligibility != v2.CrossMarginEligibility_CM_ELIGIBILITY_UNSPECIFIED {
+		market.CrossMarginEligible = crossMarginEligibility == v2.CrossMarginEligibility_CM_ELIGIBILITY_ELIGIBLE
+	}
 
 	if hasDisabledMinimalProtocolFeeUpdate != v2.DisableMinimalProtocolFeeUpdate_NoUpdate {
 		market.HasDisabledMinimalProtocolFee = hasDisabledMinimalProtocolFeeUpdate == v2.DisableMinimalProtocolFeeUpdate_True

@@ -14,14 +14,12 @@ import (
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/flags"
 	"github.com/cosmos/cosmos-sdk/server"
-	servertypes "github.com/cosmos/cosmos-sdk/server/types"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/xlab/closer"
 
-	"github.com/InjectiveLabs/injective-core/cmd/injectived/config"
 	"github.com/InjectiveLabs/injective-core/injective-chain/app"
-	streamserver "github.com/InjectiveLabs/injective-core/injective-chain/stream/server"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 )
 
 const (
@@ -34,7 +32,7 @@ const (
 )
 
 //nolint:all
-func devnetifyCmd(appCreator servertypes.AppCreator) *cobra.Command {
+func devnetifyCmd(appCreator config.InjAppCreator) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "devnetify <new_chain_id>",
 		Short: "Bootstraps devnet state from existing customized state. Use flags to provide validators keys and state overrides.",
@@ -158,21 +156,16 @@ ExchangeParams:
 
 			logger.Info("Devnet state initialized, waiting for new block to commit changes...")
 
-			svrCfg, err := getAndValidateConfig(serverCtx)
-			if err != nil {
-				return errors.Wrap(err, "failed to get and validate config")
-			}
-
 			appCfg, err := config.GetConfig(serverCtx.Viper)
 			if err != nil {
 				return errors.Wrap(err, "failed to parse app config")
 			}
 
-			serverCtx.Viper.Set(streamserver.FlagStreamServerBufferCapacity, 1)
-			serverCtx.Viper.Set(streamserver.FlagStreamPublisherBufferCapacity, 1)
+			appCfg.ChainStream.ServerBufferCapacity = 1
+			appCfg.ChainStream.PublisherBufferCapacity = 1
 
 			go func() {
-				err = startInProcess(serverCtx, svrCfg, clientCtx, sdkApp, appCfg, nil, server.StartCmdOptions{})
+				err = startInProcess(serverCtx, appCfg, clientCtx, sdkApp)
 			}()
 
 			<-time.After(waitForNodeStartAndNextBlock)

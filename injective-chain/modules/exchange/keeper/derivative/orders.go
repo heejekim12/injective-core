@@ -2,6 +2,7 @@ package derivative
 
 import (
 	"bytes"
+	"slices"
 	"sort"
 	"sync"
 
@@ -342,6 +343,8 @@ func (k DerivativeKeeper) CancelRestingDerivativeLimitOrder(
 ) error {
 	defer k.Meter(ctx).FuncTiming(&ctx, "CancelRestingDerivativeLimitOrder")()
 
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+
 	marketID := market.MarketID()
 	// 1. Add back the margin hold to available balance
 	order := k.GetDerivativeLimitOrderBySubaccountIDAndHash(ctx, marketID, isBuy, subaccountID, orderHash)
@@ -361,15 +364,16 @@ func (k DerivativeKeeper) CancelRestingDerivativeLimitOrder(
 	}
 
 	if order.IsVanilla() {
-		refundAmount := order.GetCancelRefundAmount(market.GetMakerFeeRate())
-		chainFormatRefund := market.NotionalToChainFormat(refundAmount)
-		k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, market.GetQuoteDenom(), chainFormatRefund)
+		if err := k.RiskEngine().RefundDerivativeLimitOrderCancel(ctx, k.subaccount, order, market, false); err != nil {
+			return err
+		}
 	}
 
 	// 2. Delete the order state from ordersStore, ordersIndexStore and subaccountOrderStore
 	k.DeleteDerivativeLimitOrder(ctx, marketID, order)
 
 	k.subaccount.UpdateSubaccountOrderbookMetadataFromOrderCancel(ctx, marketID, subaccountID, order)
+	k.MaybeDeleteActiveDerivativeOrderMarketForSubaccount(ctx, subaccountID, marketID)
 
 	events.Emit(ctx, k.BaseKeeper, &v2.EventCancelDerivativeOrder{
 		MarketId:      marketID.Hex(),
@@ -510,6 +514,9 @@ func (k DerivativeKeeper) UpdateDerivativeLimitOrdersFromFilledDeltas(
 	metadataBuyDeltas := make(map[common.Hash]*v2.SubaccountOrderbookMetadata, len(filledDeltas))
 	metadataSellDeltas := make(map[common.Hash]*v2.SubaccountOrderbookMetadata, len(filledDeltas))
 
+	// Track subaccounts that had orders fully filled for active-order-market index cleanup.
+	subaccountsWithFullFills := make(map[common.Hash]struct{})
+
 	for _, filledDelta := range filledDeltas {
 		var (
 			subaccountID = filledDelta.SubaccountID()
@@ -560,6 +567,9 @@ func (k DerivativeKeeper) UpdateDerivativeLimitOrdersFromFilledDeltas(
 			} else {
 				metadataDelta.VanillaLimitOrderCount--
 			}
+
+			// Track this subaccount for active-order-market index cleanup.
+			subaccountsWithFullFills[subaccountID] = struct{}{}
 		} else {
 			// Handle storage writes for orders with remaining fillable quantity:
 			// - Resting orders: update in permanent storage
@@ -606,6 +616,31 @@ func (k DerivativeKeeper) UpdateDerivativeLimitOrdersFromFilledDeltas(
 
 	k.applySubaccountOrderbookMetadataDeltas(ctx, marketID, true, metadataBuyDeltas)
 	k.applySubaccountOrderbookMetadataDeltas(ctx, marketID, false, metadataSellDeltas)
+
+	// Clean up active-order-market index and evict stale snapshots for subaccounts
+	// that had orders fully filled. Must happen after orders are deleted.
+	k.cleanupActiveOrderIndexAfterFills(ctx, marketID, subaccountsWithFullFills)
+}
+
+// cleanupActiveOrderIndexAfterFills removes the active-order-market index entry and evicts
+// cross-pool snapshot caches for subaccounts that had all orders filled in a market.
+func (k DerivativeKeeper) cleanupActiveOrderIndexAfterFills(ctx sdk.Context, marketID common.Hash, subaccounts map[common.Hash]struct{}) {
+	if len(subaccounts) == 0 {
+		return
+	}
+
+	subaccountIDs := make([]common.Hash, 0, len(subaccounts))
+	for id := range subaccounts {
+		subaccountIDs = append(subaccountIDs, id)
+	}
+	slices.SortStableFunc(subaccountIDs, func(a, b common.Hash) int {
+		return bytes.Compare(a.Bytes(), b.Bytes())
+	})
+
+	for _, subaccountID := range subaccountIDs {
+		k.MaybeDeleteActiveDerivativeOrderMarketForSubaccount(ctx, subaccountID, marketID)
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+	}
 }
 
 func (k DerivativeKeeper) applySubaccountOrderbookMetadataDeltas(
@@ -638,11 +673,33 @@ func (k DerivativeKeeper) applySubaccountOrderbookMetadataDeltas(
 	}
 }
 
+// GetBestDerivativeLimitOrderPrice returns the best price of the first executable limit
+// order on the orderbook. Cross-margin orders that cannot execute (emergency pause or
+// wind-down due to disabled denom/market-type) are skipped so that TOB pricing is
+// consistent with the executable book.
 func (k DerivativeKeeper) GetBestDerivativeLimitOrderPrice(ctx sdk.Context, marketID common.Hash, isBuy bool) *math.LegacyDec {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetBestDerivativeLimitOrderPrice")()
 
+	// Cache the market lookup and eligibility check outside the iteration.
+	market := k.GetDerivativeMarketByID(ctx, marketID)
+	cmEligible := market != nil && k.RiskEngine().CheckCrossMarginMarketEligibility(ctx, market) == nil
+	emergencyPaused := k.GetParams(ctx).CrossMarginParams.EmergencyPaused
+
 	var bestOrder *v2.DerivativeLimitOrder
 	k.IterateDerivativeLimitOrdersByMarketDirection(ctx, marketID, isBuy, func(order *v2.DerivativeLimitOrder) (stop bool) {
+		// Skip unexecutable cross-margin orders. During emergency pause, all CM orders
+		// are blocked. During wind-down (disabled denom/type), only vanilla CM orders are
+		// blocked — reduce-only CM orders remain executable for position unwinding.
+		if emergencyPaused || !cmEligible {
+			if profile, _ := k.RiskEngine().EffectiveProfile(ctx, order.SubaccountID()); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+				if emergencyPaused {
+					return false // all CM orders blocked during pause
+				}
+				if !cmEligible && order.IsVanilla() {
+					return false // only vanilla blocked during wind-down; reduce-only still executable
+				}
+			}
+		}
 		bestOrder = order
 		return true
 	})
@@ -742,6 +799,46 @@ func (k DerivativeKeeper) CancelAllTransientDerivativeLimitOrders(
 	}
 }
 
+// CancelPausedTransientDerivativeOrders cancels all transient derivative orders (both limit
+// and market) belonging to cross-margin subaccounts under emergency pause. Must be called
+// BEFORE FBA execution to prevent paused transient orders from executing or being promoted
+// to resting during post-match processing.
+func (k DerivativeKeeper) CancelPausedTransientDerivativeOrders(ctx sdk.Context) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "CancelPausedTransientDerivativeOrders")()
+
+	if !k.GetParams(ctx).CrossMarginParams.EmergencyPaused {
+		return
+	}
+
+	// Scan ALL derivative markets (including disabled/paused), not just active ones.
+	// A market disabled earlier in the same block can still have transient orders that
+	// need cancellation to prevent stranded holds and stale OLR.
+	markets := k.GetAllDerivativeMarkets(ctx)
+	for _, market := range markets {
+		marketID := market.MarketID()
+		for _, isBuy := range []bool{true, false} {
+			// Cancel paused transient limit orders.
+			limitOrders := k.GetAllTransientDerivativeLimitOrdersByMarketDirection(ctx, marketID, isBuy)
+			for _, order := range limitOrders {
+				if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+					if cancelErr := k.CancelTransientDerivativeLimitOrder(ctx, market, order); cancelErr != nil {
+						ctx.Logger().Error("failed to cancel paused transient derivative limit order",
+							"marketID", marketID.Hex(), "subaccount", order.SubaccountID().Hex(), "error", cancelErr)
+					}
+				}
+			}
+
+			// Cancel paused transient market orders.
+			marketOrders := k.GetAllTransientDerivativeMarketOrdersByMarketDirection(ctx, marketID, isBuy)
+			for _, order := range marketOrders {
+				if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+					k.CancelDerivativeMarketOrder(ctx, market, order)
+				}
+			}
+		}
+	}
+}
+
 // CancelTransientDerivativeLimitOrder cancels the transient derivative limit order
 func (k DerivativeKeeper) CancelTransientDerivativeLimitOrder(
 	ctx sdk.Context,
@@ -754,10 +851,12 @@ func (k DerivativeKeeper) CancelTransientDerivativeLimitOrder(
 	marketID := market.MarketID()
 	subaccountID := order.SubaccountID()
 
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+
 	if order.IsVanilla() {
-		refundAmount := order.GetCancelRefundAmount(market.GetTakerFeeRate())
-		chainFormatRefund := market.NotionalToChainFormat(refundAmount)
-		k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, market.GetQuoteDenom(), chainFormatRefund)
+		if err := k.RiskEngine().RefundDerivativeLimitOrderCancel(ctx, k.subaccount, order, market, true); err != nil {
+			return err
+		}
 	} else if order.IsReduceOnly() {
 		position := k.GetPosition(ctx, marketID, subaccountID)
 		if position == nil {
@@ -964,6 +1063,8 @@ func (k DerivativeKeeper) CancelConditionalDerivativeLimitOrder(
 ) error {
 	defer k.Meter(ctx).FuncTiming(&ctx, "CancelConditionalDerivativeLimitOrder")()
 
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+
 	marketID := market.MarketID()
 
 	order, direction := k.GetConditionalDerivativeLimitOrderBySubaccountIDAndHash(
@@ -984,8 +1085,9 @@ func (k DerivativeKeeper) CancelConditionalDerivativeLimitOrder(
 	}
 
 	refundAmount := order.GetCancelRefundAmount(market.GetTakerFeeRate())
-	chainFormatRefundAmount := market.NotionalToChainFormat(refundAmount)
-	k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, market.GetQuoteDenom(), chainFormatRefundAmount)
+	if refundAmount.IsPositive() {
+		k.RiskEngine().RefundDerivativeMarketOrderCancel(ctx, k.subaccount, subaccountID, market, refundAmount)
+	}
 
 	// 2. Delete the order state from ordersStore and ordersIndexStore
 	k.DeleteConditionalDerivativeOrder(ctx, true, marketID, order.SubaccountID(), direction, *order.TriggerPrice, order.Hash(), order.Cid())
@@ -998,6 +1100,7 @@ func (k DerivativeKeeper) CancelConditionalDerivativeLimitOrder(
 		metadata.ReduceOnlyConditionalOrderCount--
 	}
 	k.SetSubaccountOrderbookMetadata(ctx, marketID, subaccountID, order.IsBuy(), metadata)
+	k.MaybeDeleteActiveDerivativeOrderMarketForSubaccount(ctx, subaccountID, marketID)
 
 	events.Emit(ctx, k.BaseKeeper, &v2.EventCancelConditionalDerivativeOrder{
 		MarketId:      marketID.Hex(),
@@ -1215,6 +1318,8 @@ func (k DerivativeKeeper) CancelConditionalDerivativeMarketOrder(
 ) error {
 	defer k.Meter(ctx).FuncTiming(&ctx, "CancelConditionalDerivativeMarketOrder")()
 
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+
 	marketID := market.MarketID()
 
 	order, direction := k.GetConditionalDerivativeMarketOrderBySubaccountIDAndHash(
@@ -1231,8 +1336,9 @@ func (k DerivativeKeeper) CancelConditionalDerivativeMarketOrder(
 
 	if order.IsVanilla() {
 		refundAmount := order.GetCancelRefundAmount()
-		chainFormatRefundAmount := market.NotionalToChainFormat(refundAmount)
-		k.subaccount.IncrementAvailableBalanceOrBank(ctx, order.SubaccountID(), market.GetQuoteDenom(), chainFormatRefundAmount)
+		if refundAmount.IsPositive() {
+			k.RiskEngine().RefundDerivativeMarketOrderCancel(ctx, k.subaccount, subaccountID, market, refundAmount)
+		}
 	}
 
 	// 2. Delete the order state from ordersStore and ordersIndexStore
@@ -1255,6 +1361,7 @@ func (k DerivativeKeeper) CancelConditionalDerivativeMarketOrder(
 		metadata.ReduceOnlyConditionalOrderCount--
 	}
 	k.SetSubaccountOrderbookMetadata(ctx, marketID, subaccountID, order.IsBuy(), metadata)
+	k.MaybeDeleteActiveDerivativeOrderMarketForSubaccount(ctx, subaccountID, marketID)
 
 	events.Emit(ctx, k.BaseKeeper, &v2.EventCancelConditionalDerivativeOrder{
 		MarketId:      marketID.Hex(),
@@ -1292,10 +1399,12 @@ func (k DerivativeKeeper) CancelDerivativeMarketOrder(
 
 	marketID := market.MarketID()
 	subaccountID := order.SubaccountID()
-	refundAmount := order.GetCancelRefundAmount()
-	chainFormatRefund := market.NotionalToChainFormat(refundAmount)
 
-	k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, market.GetQuoteDenom(), chainFormatRefund)
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+	refundAmount := order.GetCancelRefundAmount()
+	if refundAmount.IsPositive() {
+		k.RiskEngine().RefundDerivativeMarketOrderCancel(ctx, k.subaccount, subaccountID, market, refundAmount)
+	}
 	k.DeleteDerivativeMarketOrder(ctx, order, marketID)
 
 	events.Emit(ctx, k.BaseKeeper, &v2.EventCancelDerivativeOrder{
@@ -1411,15 +1520,11 @@ func (k DerivativeKeeper) CancelAllDerivativeMarketOrdersBySubaccountID(
 ) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "CancelAllDerivativeMarketOrdersBySubaccountID")()
 
-	buyOrders := k.GetAllSubaccountDerivativeMarketOrdersByMarketDirection(ctx, marketID, subaccountID, true)
-	sellOrders := k.GetAllSubaccountDerivativeMarketOrdersByMarketDirection(ctx, marketID, subaccountID, false)
-
-	for _, order := range buyOrders {
-		k.CancelDerivativeMarketOrder(ctx, market, order)
-	}
-
-	for _, order := range sellOrders {
-		k.CancelDerivativeMarketOrder(ctx, market, order)
+	for _, isBuy := range []bool{true, false} {
+		k.IterateDerivativeMarketOrdersBySubaccount(ctx, marketID, subaccountID, isBuy, func(order *v2.DerivativeMarketOrder) (stop bool) {
+			k.CancelDerivativeMarketOrder(ctx, market, order)
+			return false
+		})
 	}
 }
 
@@ -1511,6 +1616,11 @@ func (k DerivativeKeeper) CreateDerivativeMarketOrder(
 	if derivativeOrder.OrderType.IsAtomic() {
 		err = k.EnsureValidAccessLevelForAtomicExecution(ctx, sender)
 		if err != nil {
+			// ReserveDerivativeOrderMargin already mutated the cross-pool OLR cache for vanilla
+			// orders. Evict to prevent phantom OLR from rejecting later orders in this block.
+			if derivativeOrder.IsVanilla() {
+				k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+			}
 			return orderHash, nil, err
 		}
 	}
@@ -1523,7 +1633,13 @@ func (k DerivativeKeeper) CreateDerivativeMarketOrder(
 		marketOrder.MarginHold = orderMarginHold
 	}
 
-	return k.processDerivativeMarketOrder(ctx, marketID, marketOrder, derivativeOrder, market, markPrice, metadata, sender, orderHash)
+	hash, results, processErr := k.processDerivativeMarketOrder(ctx, marketID, marketOrder, derivativeOrder, market, markPrice, metadata, sender, orderHash)
+	if processErr != nil && derivativeOrder.IsVanilla() {
+		// ReserveDerivativeOrderMargin already mutated the cross-pool OLR cache. Evict to
+		// prevent phantom OLR from rejecting later orders from the same subaccount in this block.
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+	}
+	return hash, results, processErr
 }
 
 func (k DerivativeKeeper) EnsureValidAccessLevelForAtomicExecution(
@@ -1732,6 +1848,16 @@ func (k DerivativeKeeper) EnsureValidDerivativeOrder(
 		return orderHash, errors.Wrapf(types.ErrDerivativeMarketNotFound, "active derivative market for marketID %s not found", derivativeOrder.MarketId)
 	}
 
+	profile, _ := k.RiskEngine().EffectiveProfile(ctx, subaccountID)
+	isCross := profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS
+	if isCross && derivativeOrder.IsReduceOnly() {
+		// Reduce-only orders are risk-reducing and do not participate in order locking.
+		// Allow them even when cross-margin eligibility gates are disabled, but keep binary options isolated-only.
+		if marketType.IsBinaryOptions() {
+			return orderHash, errors.Wrap(types.ErrFeatureDisabled, "binary options are isolated-only")
+		}
+	}
+
 	if err := derivativeOrder.CheckValidConditionalPrice(markPrice); err != nil {
 		return orderHash, err
 	}
@@ -1802,13 +1928,10 @@ func (k DerivativeKeeper) EnsureValidDerivativeOrder(
 				funding = k.GetPerpetualMarketFunding(ctx, marketID)
 			}
 			// Check that the order can close the position
-			if err := position.CheckValidPositionToReduce(
-				marketType,
-				derivativeOrder.Price(),
-				derivativeOrder.IsBuy(),
-				tradeFeeRate,
-				funding,
-				derivativeOrder.Margin,
+			if err := k.RiskEngine().CheckValidPositionToReduce(
+				ctx, subaccountID, position, marketType,
+				derivativeOrder.Price(), derivativeOrder.IsBuy(),
+				tradeFeeRate, funding, derivativeOrder.Margin,
 			); err != nil {
 				return orderHash, err
 			}
@@ -1830,6 +1953,12 @@ func (k DerivativeKeeper) EnsureValidDerivativeOrder(
 		}
 	}
 
+	// Check for cross-margin emergency pause BEFORE the IsVanilla() check.
+	// This ensures that reduce-only orders are also blocked during emergency pause.
+	if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, subaccountID); err != nil {
+		return orderHash, err
+	}
+
 	// Check Order/Position Margin amount
 	if derivativeOrder.IsVanilla() {
 		// Reject if the subaccount's available deposits does not have at least the required funds for the trade
@@ -1837,20 +1966,11 @@ func (k DerivativeKeeper) EnsureValidDerivativeOrder(
 		if derivativeOrder.IsConditional() {
 			markPriceToCheck = *derivativeOrder.TriggerPrice // for conditionals trigger price == mark price at the point in the future when the order will materialize
 		}
-		marginHold, err := derivativeOrder.CheckMarginAndGetMarginHold(
-			market.GetInitialMarginRatio(),
-			markPriceToCheck,
-			tradeFeeRate,
-			marketType,
-			market.GetOracleScaleFactor(),
+		marginHold, err := k.RiskEngine().ReserveDerivativeOrderMargin(
+			ctx, k.subaccount, subaccountID, derivativeOrder,
+			market, markPriceToCheck, tradeFeeRate,
 		)
 		if err != nil {
-			return orderHash, err
-		}
-
-		// Decrement the available balance by the funds amount needed to fund the order
-		chainFormattedMarginHold := market.NotionalToChainFormat(marginHold)
-		if err := k.subaccount.ChargeAccount(ctx, subaccountID, market.GetQuoteDenom(), chainFormattedMarginHold); err != nil {
 			return orderHash, err
 		}
 
@@ -1862,6 +1982,10 @@ func (k DerivativeKeeper) EnsureValidDerivativeOrder(
 
 	if !derivativeOrder.IsConditional() {
 		if err := k.resolveReduceOnlyConflicts(ctx, derivativeOrder, subaccountID, marketID, metadata, position); err != nil {
+			// ReserveDerivativeOrderMargin may have updated the cached cross-pool OLR snapshot.
+			// Since the order is being rejected, evict the stale cache so subsequent same-block
+			// orders are not admitted/rejected against phantom OLR from this failed order.
+			k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 			return orderHash, err
 		}
 	}

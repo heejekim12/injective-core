@@ -10,6 +10,7 @@ import (
 
 	exchangetypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 const MaxFutureClaims = 10
@@ -350,22 +351,13 @@ func (k *Keeper) GetAttestationMapping(ctx sdk.Context) (out map[uint64][]*types
 func (k *Keeper) IterateAttestations(ctx sdk.Context, cb func(k []byte, v *types.Attestation) (stop bool)) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "IterateAttestations")()
 
-	store := ctx.KVStore(k.storeKey)
-	prefix := types.OracleAttestationKey
-
-	iter := store.Iterator(PrefixRange(prefix))
-	defer iter.Close()
-
-	for ; iter.Valid(); iter.Next() {
-		attestation := types.Attestation{}
-
-		k.cdc.MustUnmarshal(iter.Value(), &attestation)
+	chaintypes.IterateSafe(k.getStore(ctx).Iterator(PrefixRange(types.OracleAttestationKey)), func(key, value []byte) (stop bool) {
+		var att types.Attestation
+		k.cdc.MustUnmarshal(value, &att)
 
 		// cb returns true to stop early
-		if cb(iter.Key(), &attestation) {
-			return
-		}
-	}
+		return cb(key, &att)
+	})
 }
 
 // GetLastObservedValset retrieves the last observed validator set from the store
@@ -479,30 +471,4 @@ func (k *Keeper) GetLastEventByValidator(ctx sdk.Context, validator sdk.ValAddre
 	k.cdc.MustUnmarshal(rawEvent, &lastEvent)
 
 	return lastEvent
-}
-
-func (k *Keeper) PruneAttestation7005(ctx sdk.Context) {
-	//	fetch the old key used to set attestation 7005
-	var key7005 []byte
-	k.IterateAttestations(ctx, func(key []byte, att *types.Attestation) (stop bool) {
-		claim, err := k.UnpackAttestationClaim(att)
-		if err != nil {
-			return false
-		}
-
-		if claim.GetEventNonce() != 7005 {
-			return false
-		}
-
-		key7005 = key
-
-		return true
-	})
-
-	if key7005 == nil {
-		return
-	}
-
-	// prune the store (DeleteAttestation won't work)
-	ctx.KVStore(k.storeKey).Delete(key7005)
 }

@@ -1,14 +1,15 @@
 package foundry
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/pkg/stdcopy"
 	dockertypes "github.com/moby/moby/api/types"
 	"github.com/moby/moby/client"
 )
@@ -26,8 +27,6 @@ func NewFoundryContainer(
 	dockerClient *client.Client,
 	networkID string,
 ) (*Container, error) {
-
-	// Build the deployer image
 	deployerImageTag := "injectivelabs/injective-foundry-deployer:local"
 
 	// Create container
@@ -87,23 +86,27 @@ func (dc *Container) Exec(ctx context.Context, cmd []string) (stdout, stderr str
 	}
 	defer resp.Close()
 
+	var (
+		stdoutBuf bytes.Buffer
+		stderrBuf bytes.Buffer
+	)
+
 	// Read output
-	stdoutBytes, err := io.ReadAll(resp.Reader)
-	if err != nil {
+	if _, err = stdcopy.StdCopy(&stdoutBuf, &stderrBuf, resp.Reader); err != nil {
 		return "", "", fmt.Errorf("failed to read output: %w", err)
 	}
 
 	// Check exit code
 	inspectResp, err := dc.client.ContainerExecInspect(ctx, execID.ID)
 	if err != nil {
-		return string(stdoutBytes), "", fmt.Errorf("failed to inspect exec: %w", err)
+		return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("failed to inspect exec: %w", err)
 	}
 
 	if inspectResp.ExitCode != 0 {
-		return string(stdoutBytes), "", fmt.Errorf("command exited with code %d", inspectResp.ExitCode)
+		return stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("command exited with code %d", inspectResp.ExitCode)
 	}
 
-	return string(stdoutBytes), "", nil
+	return stdoutBuf.String(), stderrBuf.String(), nil
 }
 
 // WriteFile writes content to a file inside the container

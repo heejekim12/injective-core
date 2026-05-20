@@ -21,7 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 
-	appconfig "github.com/InjectiveLabs/injective-core/cmd/injectived/config"
+	appconfig "github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 	rpctypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/rpc/types"
 	evmtypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/types"
 	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
@@ -165,7 +165,7 @@ func NewBackend(
 	jsonRPCConfig appconfig.JSONRPCConfig,
 	indexer chaintypes.EVMTxIndexer,
 ) *Backend {
-	appConf, err := appconfig.ParseConfig(ctx.Viper)
+	appConf, err := appconfig.GetConfig(ctx.Viper)
 	if err != nil {
 		panic(err)
 	}

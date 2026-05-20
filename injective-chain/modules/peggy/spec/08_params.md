@@ -5,7 +5,7 @@ title: Parameters
 
 # Params
 
-This document describes and advises configuration of the Peggy module's parameters. The default parameters can be found in the genesis.go of the peggy module.
+This document describes and advises configuration of the Peggy module's parameters. The default parameters can be found in the Peggy module's `genesis.go`.
 
 ```go
 type Params struct {
@@ -57,7 +57,7 @@ is address of the bridge contract on the Ethereum side, this is a
 reference value for governance only and is not actually used by any
 Peggy module code.
 
-The Ethereum bridge relayer use this value to interact with Peggy contract for querying events and submitting valset/batches to Peggy contract.
+The Ethereum bridge relayer uses this value to interact with the Peggy contract for querying events and submitting valsets and batches.
 
 ## `bridge_chain_id`
 
@@ -72,12 +72,16 @@ These reference values may be used by future Peggy client implementations to all
 * `signed_claims_window`
 
 These values represent the time in blocks that a validator has to submit
-a signature for a batch or valset, or to submit a claim for a particular
+a signature for a batch or valset, or historically to submit a claim for a particular
 attestation nonce.
 
-In the case of attestations this clock starts when the
-attestation is created, but only allows for slashing once the event has passed.
-Note that that claims slashing is not currently enabled see [slashing spec](./05_slashing.md)
+In the current implementation:
+
+- `signed_valsets_window` controls when missing valset confirmations become eligible for jailing checks.
+- `signed_batches_window` controls when missing batch confirmations become eligible for jailing checks.
+- `signed_claims_window` is retained for the historical claim-penalty design, but claim penalties are not currently executed.
+
+In the case of attestations this clock would start when the attestation is created. Note that claim penalties are not currently enabled. See the [validator penalties spec](05_jailing.md).
 
 ## `target_batch_timeout`
 
@@ -101,11 +105,11 @@ to produce a block
 * `slash_fraction_batch`
 * `slash_fraction_claim`
 * `slash_fraction_conflicting_claim`
+* `slash_fraction_bad_eth_signature`
 
-The slashing fractions for the various peggy related slashing conditions. The first three
-refer to not submitting a particular message, the third for failing to submit a claim and the last for submitting a different claim than other validators.
+These parameters are still part of `Params`, but the current Peggy penalty paths do not consume them. The currently implemented valset, batch, and bad-signature penalty flows jail validators without calling `StakingKeeper.Slash`.
 
-Note that claim slashing is currently disabled as outlined in the [slashing spec](./05_slashing.md)
+The claim-related fractions correspond to historical claim-penalty paths, which remain disabled as outlined in the [validator penalties spec](05_jailing.md).
 
 ## `valset_reward`
 

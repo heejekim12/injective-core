@@ -267,6 +267,58 @@ Reports are submitted via `MsgRelayChainlinkPrices` and verified on-chain using 
 
 > **Deprecated.** The legacy Chainlink oracle type (`0x41`) has been replaced by Chainlink Data Streams (`0x91`).
 
+## PythPro (Pyth Lazer)
+
+PythPro prices are stored as follows:
+
+- PythProPriceState: `0xA1 | uint32(feedID) (4 bytes BE) -> ProtocolBuffer(PythProPriceState)`
+
+```protobuf
+// PythProPriceState holds the verified price state for a single PythPro feed.
+message PythProPriceState {
+  // feed_id is the uint32 Pyth Lazer feed identifier.
+  uint32 feed_id = 1;
+  // timestamp is the price timestamp extracted from the verified payload
+  // (microseconds from epoch).
+  uint64 timestamp = 2;
+  PriceState price_state = 3 [(gogoproto.nullable) = false];
+}
+```
+
+Each feed is keyed by its 4-byte big-endian `feedID` (a `uint32`). Updates are submitted via `MsgRelayPythProPrices` and verified on-chain using the PythLazer verifier EVM contract configured in module params.
+
+## SEDA Fast
+
+SEDA Fast prices are stored as follows:
+
+- SedaFastPriceState: `0xB1 | keccak256(feedID) (32 bytes) -> ProtocolBuffer(SedaFastPriceState)`
+
+```protobuf
+// SedaFastPriceState holds the verified price state for a single SEDA Fast feed.
+message SedaFastPriceState {
+  // feed_id is the hex-encoded execInputs string from the SEDA Fast
+  // dataRequest. It is the stable on-chain identity of the feed, invariant
+  // across relayer restarts and per-execution result IDs.
+  string feed_id = 1;
+  // timestamp is the dataResult.blockTimestamp value (milliseconds from
+  // epoch) extracted from the verified SEDA Fast response.
+  uint64 timestamp = 2;
+  PriceState price_state = 3 [(gogoproto.nullable) = false];
+}
+```
+
+The store key uses `keccak256(feedID)` (32 bytes) for a fixed-length key, allowing safe prefix iteration. The original `feed_id` string is preserved inside the proto value so it can be recovered during iteration without reversing the hash.
+
+`feed_id` is the hex-encoded `execInputs` field from the SEDA Fast data request — the stable, human-readable identifier for the feed that the relayer subscribes to. It is used as the `OracleInfo.Symbol` when creating derivative markets backed by a SEDA Fast feed.
+
+Updates are submitted via `MsgRelaySedaFastPrices` as raw JSON envelopes. Each envelope is validated on-chain:
+1. The `drId` is reconstructed from `dataRequest` fields and compared against `dataResult.drId`.
+2. A `dataResultId` is derived from `dataResult` fields and the `secp256k1` ECDSA signature is verified against the SEDA Fast public key configured in `SedaFastParams.public_key`.
+3. A monotonic-timestamp guard is applied: an envelope is accepted only if `dataResult.blockTimestamp` is strictly greater than the last stored `SedaFastPriceState.timestamp` for that feed. The exchange-visible `price_state.timestamp` records the relay block time (`ctx.BlockTime()`) used for cumulative-price/TWAP accounting.
+4. The `result` bytes are decoded using the decoder selected by `execProgramId` (simple ASCII decimal or JSON mantissa/exponent).
+
+See [SEDA Fast documentation](https://docs.seda.xyz/home/for-developers/define-your-delivery-method/seda-fast) for details on the identifier derivation formulas.
+
 ## Historical Price Records
 
 The following oracle types append price records to a rolling per-symbol history used for volatility and TWAP queries: PriceFeed, Coinbase, Provider, Pyth, Stork, Chainlink Data Streams, and BandIBC (deprecated). Legacy Band (direct) and legacy Chainlink do not append historical records.

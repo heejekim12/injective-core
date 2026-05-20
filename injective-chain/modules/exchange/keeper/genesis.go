@@ -58,6 +58,16 @@ func (k *Keeper) InitGenesis(ctx sdk.Context, data v2.GenesisState) {
 		)
 	}
 
+	for _, record := range data.SubaccountRiskProfiles {
+		if err := k.SetSubaccountRiskProfile(
+			ctx,
+			common.HexToHash(record.SubaccountId),
+			&record.RiskProfile,
+		); err != nil {
+			panic(fmt.Sprintf("failed to set subaccount risk profile during genesis: %v", err))
+		}
+	}
+
 	for _, m := range data.ExpiryFuturesMarketInfoState {
 		marketID := common.HexToHash(m.MarketId)
 		k.SetExpiryFuturesMarketInfo(ctx, marketID, m.MarketInfo)
@@ -279,6 +289,12 @@ func (k *Keeper) InitGenesis(ctx sdk.Context, data v2.GenesisState) {
 	for _, denomMinNotional := range data.DenomMinNotionals {
 		k.SetMinNotionalForDenom(ctx, denomMinNotional.Denom, denomMinNotional.MinNotional)
 	}
+
+	// If the imported state has emergency pause active, cancel all cross-margin orders
+	// so the books don't contain unmatchable ghost orders from the snapshot.
+	if data.Params.CrossMarginParams.EmergencyPaused {
+		k.CancelAllCrossMarginOrdersOnEmergencyPause(ctx)
+	}
 }
 
 func (k *Keeper) ExportGenesis(ctx sdk.Context) *v2.GenesisState {
@@ -320,5 +336,6 @@ func (k *Keeper) ExportGenesis(ctx sdk.Context) *v2.GenesisState {
 		GrantAuthorizations:                          k.GetAllGrantAuthorizations(ctx),
 		ActiveGrants:                                 k.GetAllActiveGrants(ctx),
 		DenomMinNotionals:                            k.GetAllDenomMinNotionals(ctx),
+		SubaccountRiskProfiles:                       k.GetAllSubaccountRiskProfiles(ctx),
 	}
 }

@@ -4,11 +4,10 @@ import (
 	"strings"
 
 	"cosmossdk.io/errors"
+	"github.com/InjectiveLabs/injective-core/injective-chain/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-
-	"github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 // constants
@@ -235,14 +234,13 @@ func NewMsgSetDenomMetadata(sender string, metadata banktypes.Metadata, adminBur
 
 func (m MsgSetDenomMetadata) Route() string { return RouterKey }
 func (m MsgSetDenomMetadata) Type() string  { return TypeMsgSetDenomMetadata }
+
 func (m MsgSetDenomMetadata) ValidateBasic() error {
-	_, err := sdk.AccAddressFromBech32(m.Sender)
-	if err != nil {
+	if _, err := sdk.AccAddressFromBech32(m.Sender); err != nil {
 		return errors.Wrapf(sdkerrors.ErrInvalidAddress, "Invalid sender address (%s)", err)
 	}
 
-	err = m.Metadata.Validate()
-	if err != nil {
+	if err := m.Metadata.Validate(); err != nil {
 		return err
 	}
 
@@ -250,16 +248,50 @@ func (m MsgSetDenomMetadata) ValidateBasic() error {
 		return errors.Wrap(ErrInvalidDenom, "cannot set metadata for INJ")
 	}
 
-	err = sdk.ValidateDenom(m.Metadata.Base)
-	if err != nil {
+	if err := sdk.ValidateDenom(m.Metadata.Base); err != nil {
 		return err
+	}
+
+	if len(m.Metadata.Name) > MaxNameLength {
+		return errors.Wrapf(ErrInvalidDenom, "max denom name length exceeded: actual=%d, max=%d", len(m.Metadata.Name), MaxNameLength)
+	}
+
+	if len(m.Metadata.Symbol) > MaxSymbolLength {
+		return errors.Wrapf(ErrInvalidDenom, "max symbol length exceeded: actual=%d, max=%d", len(m.Metadata.Symbol), MaxSymbolLength)
+	}
+
+	if len(m.Metadata.DenomUnits) > MaxUnits {
+		return errors.Wrapf(ErrInvalidDenom, "max denom units exceeded: actual=%d max=%d", len(m.Metadata.DenomUnits), MaxUnits)
+	}
+
+	if len(m.Metadata.Description) > MaxDescriptionLength {
+		return errors.Wrapf(ErrInvalidDenom, "max description length exceeded: actual=%d max=%d", len(m.Metadata.Description), MaxDescriptionLength)
+	}
+
+	if len(m.Metadata.URI) > MaxURILength {
+		return errors.Wrapf(ErrInvalidDenom, "max URI length exceeded: actual=%d max=%d", len(m.Metadata.URI), MaxURILength)
+	}
+
+	if len(m.Metadata.URIHash) > MaxURIHashLength {
+		return errors.Wrapf(ErrInvalidDenom, "max URI hash length exceeded: actual=%d max=%d", len(m.Metadata.URIHash), MaxURIHashLength)
+	}
+
+	for _, du := range m.Metadata.DenomUnits {
+		if len(du.Aliases) > MaxAliases {
+			return errors.Wrapf(ErrInvalidDenom, "max aliases per denom exceeded: actual=%d max=%d", len(du.Aliases), MaxAliases)
+		}
+
+		for _, alias := range du.Aliases {
+			if len(alias) > MaxNameLength {
+				return errors.Wrapf(ErrInvalidDenom, "alias exceeds max length: actual=%d max=%d", len(alias), MaxNameLength)
+			}
+		}
 	}
 
 	// If denom metadata is for a TokenFactory denom, run the different components validations
 	strParts := strings.Split(m.Metadata.Base, "/")
 	if len(strParts) > 2 {
-		_, _, err = DeconstructDenom(m.Metadata.Base)
-		if err != nil {
+		if _, _, err := DeconstructDenom(m.Metadata.Base); err != nil {
 			return err
 		}
 	}

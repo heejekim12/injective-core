@@ -34,6 +34,7 @@ func (k *BaseKeeper) SetConditionalDerivativeMarketOrder(
 	ordersStore.Set(priceKey, orderBz)
 
 	k.SetCid(ctx, false, order.SubaccountID(), order.OrderInfo.Cid, marketID, order.IsBuy(), order.Hash())
+	k.SetActiveDerivativeOrderMarketForSubaccount(ctx, order.SubaccountID(), marketID)
 }
 
 func (k *BaseKeeper) SetConditionalDerivativeLimitOrder(
@@ -59,6 +60,7 @@ func (k *BaseKeeper) SetConditionalDerivativeLimitOrder(
 	ordersStore.Set(priceKey, orderBz)
 
 	k.SetCid(ctx, false, order.SubaccountID(), order.OrderInfo.Cid, marketID, order.IsBuy(), order.Hash())
+	k.SetActiveDerivativeOrderMarketForSubaccount(ctx, order.SubaccountID(), marketID)
 }
 
 // DeleteConditionalDerivativeOrder deletes the conditional derivative order (market or limit).
@@ -98,6 +100,10 @@ func (k *BaseKeeper) DeleteConditionalDerivativeOrder( //nolint:revive // ok
 	ordersIndexStore.Delete(subaccountIndexKey)
 
 	k.DeleteCid(ctx, false, subaccountID, orderCid)
+
+	// NOTE: MaybeDeleteActiveDerivativeOrderMarketForSubaccount is NOT called here because
+	// SubaccountOrderbookMetadata (used by hasAnyDerivativeOrdersInMarketForSubaccount) may not
+	// yet reflect this deletion. Callers must call it after metadata is applied.
 }
 
 // GetConditionalDerivativeLimitOrderBySubaccountIDAndHash returns the active conditional derivative limit order from hash and subaccountID.

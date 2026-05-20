@@ -102,6 +102,8 @@ func (k *BaseKeeper) SetNewDerivativeLimitOrder(
 	priceKey := types.GetLimitOrderByPriceKeyPrefix(marketID, order.IsBuy(), order.Price(), order.Hash())
 	subaccountKey := types.GetLimitOrderIndexKey(marketID, order.IsBuy(), order.SubaccountID(), order.Hash())
 	ordersIndexStore.Set(subaccountKey, priceKey)
+
+	k.SetActiveDerivativeOrderMarketForSubaccount(ctx, order.SubaccountID(), marketID)
 }
 
 // DeleteDerivativeLimitOrderByFields deletes the DerivativeLimitOrder.
@@ -177,6 +179,11 @@ func (k *BaseKeeper) DeleteDerivativeLimitOrder(
 	k.DeleteSubaccountOrder(ctx, marketID, order)
 	k.DeleteCid(ctx, false, order.SubaccountID(), order.Cid())
 	k.DecrementOrderbookPriceLevelQuantity(ctx, marketID, order.IsBuy(), false, order.GetPrice(), order.GetFillable())
+
+	// NOTE: MaybeDeleteActiveDerivativeOrderMarketForSubaccount is NOT called here because
+	// SubaccountOrderbookMetadata (used by hasAnyDerivativeOrdersInMarketForSubaccount) is
+	// updated in batch after all order deletions. Callers that delete the last order in a market
+	// must call MaybeDeleteActiveDerivativeOrderMarketForSubaccount after metadata is applied.
 }
 
 // IterateDerivativeLimitOrdersByMarketDirection iterates over derivative limits for a given marketID and direction.
@@ -378,6 +385,7 @@ func (k *BaseKeeper) SetTransientDerivativeLimitOrderIndicator(
 	}
 }
 
+
 func (k *BaseKeeper) IterateTransientDerivativeLimitOrdersByMarketDirectionBySubaccountID(
 	ctx sdk.Context,
 	marketID common.Hash,
@@ -436,6 +444,10 @@ func (k *BaseKeeper) SetTransientDerivativeMarketOrder(
 	bz := k.cdc.MustMarshal(marketOrder)
 	ordersStore.Set(key, bz)
 
+	// set subaccount derivative market order store (for efficient per-subaccount iteration)
+	subaccountKey := types.GetSubaccountDerivativeMarketOrderKey(marketID, order.SubaccountID(), order.IsBuy(), marketOrder.OrderInfo.Price, orderHash)
+	store.Set(subaccountKey, []byte{})
+
 	// set derivative order markets indicator store
 	key = types.GetDerivativeMarketTransientMarketsKey(marketID, order.OrderType.IsBuy())
 	if !store.Has(key) {
@@ -457,10 +469,139 @@ func (k *BaseKeeper) DeleteDerivativeMarketOrder(
 
 	// set main derivative market order state transient store
 	ordersStore := prefix.NewStore(store, types.DerivativeMarketOrdersPrefix)
-	key := types.GetOrderByPriceKeyPrefix(marketID, order.OrderType.IsBuy(), order.OrderInfo.Price, common.BytesToHash(order.OrderHash))
+	orderHash := common.BytesToHash(order.OrderHash)
+	key := types.GetOrderByPriceKeyPrefix(marketID, order.OrderType.IsBuy(), order.OrderInfo.Price, orderHash)
 	ordersStore.Delete(key)
 
+	subaccountKey := types.GetSubaccountDerivativeMarketOrderKey(marketID, order.SubaccountID(), order.IsBuy(), order.OrderInfo.Price, orderHash)
+	store.Delete(subaccountKey)
+
 	k.DeleteCid(ctx, true, order.SubaccountID(), order.Cid())
+}
+
+// IterateDerivativeMarketOrdersBySubaccount iterates over the transient derivative market orders for a given
+// (marketID, subaccountID, direction).
+//
+// This avoids scanning all market orders in a market when building per-subaccount cross-margin snapshots.
+func (k *BaseKeeper) IterateDerivativeMarketOrdersBySubaccount(
+	ctx sdk.Context,
+	marketID common.Hash,
+	subaccountID common.Hash,
+	isBuy bool,
+	process func(order *v2.DerivativeMarketOrder) (stop bool),
+) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "IterateDerivativeMarketOrdersBySubaccount")()
+
+	store := k.getTransientStore(ctx)
+	ordersStore := prefix.NewStore(store, types.DerivativeMarketOrdersPrefix)
+	orderIndexStore := prefix.NewStore(store, types.GetSubaccountDerivativeMarketOrderPrefixByMarketSubaccountDirection(marketID, subaccountID, isBuy))
+
+	var iter storetypes.Iterator
+	if isBuy {
+		iter = orderIndexStore.ReverseIterator(nil, nil)
+	} else {
+		iter = orderIndexStore.Iterator(nil, nil)
+	}
+
+	orderKeySuffixes := make([][]byte, 0)
+	iterateKeysSafe(iter, func(key []byte) bool {
+		// copy since iterator reuses the underlying slice
+		orderKeySuffixes = append(orderKeySuffixes, append([]byte(nil), key...))
+		return false
+	})
+
+	for _, suffix := range orderKeySuffixes {
+		if len(suffix) <= common.HashLength {
+			continue
+		}
+
+		paddedPriceBz := suffix[:len(suffix)-common.HashLength]
+		orderHash := common.BytesToHash(suffix[len(suffix)-common.HashLength:])
+
+		orderKey := make([]byte, 0, common.HashLength+1+len(paddedPriceBz)+common.HashLength)
+		orderKey = append(orderKey, types.MarketDirectionPrefix(marketID, isBuy)...)
+		orderKey = append(orderKey, paddedPriceBz...)
+		orderKey = append(orderKey, orderHash.Bytes()...)
+
+		bz := ordersStore.Get(orderKey)
+		if bz == nil {
+			continue
+		}
+
+		var order v2.DerivativeMarketOrder
+		k.cdc.MustUnmarshal(bz, &order)
+		if process(&order) {
+			return
+		}
+	}
+}
+
+// GetTransientDerivativeMarketOrderForSubaccount returns the single transient derivative market order
+// for the given (market, subaccount, direction), or nil if none exists. There is at most one
+// market order per (subaccount, market) per block.
+func (k *BaseKeeper) GetTransientDerivativeMarketOrderForSubaccount(
+	ctx sdk.Context,
+	marketID common.Hash,
+	subaccountID common.Hash,
+	isBuy bool,
+) *v2.DerivativeMarketOrder {
+	defer k.Meter(ctx).FuncTiming(&ctx, "GetTransientDerivativeMarketOrderForSubaccount")()
+
+	store := k.getTransientStore(ctx)
+	ordersStore := prefix.NewStore(store, types.DerivativeMarketOrdersPrefix)
+	indexStore := prefix.NewStore(store, types.GetSubaccountDerivativeMarketOrderPrefixByMarketSubaccountDirection(marketID, subaccountID, isBuy))
+
+	// Collect the first key suffix via iterateKeysSafe (safe against transient store OOG edge cases).
+	var orderKeySuffix []byte
+	iterateKeysSafe(indexStore.Iterator(nil, nil), func(key []byte) bool {
+		orderKeySuffix = append([]byte(nil), key...) // copy since iterator reuses the slice
+		return true                                  // stop after first key
+	})
+
+	if len(orderKeySuffix) <= common.HashLength {
+		return nil
+	}
+
+	paddedPriceBz := orderKeySuffix[:len(orderKeySuffix)-common.HashLength]
+	orderHash := common.BytesToHash(orderKeySuffix[len(orderKeySuffix)-common.HashLength:])
+
+	orderKey := make([]byte, 0, common.HashLength+1+len(paddedPriceBz)+common.HashLength)
+	orderKey = append(orderKey, types.MarketDirectionPrefix(marketID, isBuy)...)
+	orderKey = append(orderKey, paddedPriceBz...)
+	orderKey = append(orderKey, orderHash.Bytes()...)
+
+	bz := ordersStore.Get(orderKey)
+	if bz == nil {
+		return nil
+	}
+
+	var order v2.DerivativeMarketOrder
+	k.cdc.MustUnmarshal(bz, &order)
+	return &order
+}
+
+// HasTransientDerivativeMarketOrderForSubaccount returns true if the subaccount has at least one
+// transient derivative market order in the given market and direction. This is cheaper than
+// IterateDerivativeMarketOrdersBySubaccount when the caller only needs an existence check,
+// since it avoids deserialising the order. There is at most one market order per
+// (subaccount, market, direction).
+func (k *BaseKeeper) HasTransientDerivativeMarketOrderForSubaccount(
+	ctx sdk.Context,
+	marketID common.Hash,
+	subaccountID common.Hash,
+	isBuy bool,
+) bool {
+	defer k.Meter(ctx).FuncTiming(&ctx, "HasTransientDerivativeMarketOrderForSubaccount")()
+
+	store := k.getTransientStore(ctx)
+	indexStore := prefix.NewStore(store, types.GetSubaccountDerivativeMarketOrderPrefixByMarketSubaccountDirection(marketID, subaccountID, isBuy))
+
+	found := false
+	iterateKeysSafe(indexStore.Iterator(nil, nil), func(_ []byte) bool {
+		found = true
+		return true // stop after first key
+	})
+	return found
 }
 
 // IterateTransientDerivativeLimitOrdersBySubaccount iterates over the transient derivative limits order index

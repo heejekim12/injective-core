@@ -38,9 +38,9 @@ import (
 
 	sdkerrors "cosmossdk.io/errors"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	simtestutil "github.com/cosmos/cosmos-sdk/testutil/sims"
 
 	simapp "github.com/InjectiveLabs/injective-core/injective-chain/app"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 )
 
 const (
@@ -88,9 +88,9 @@ func setupApp() (*simapp.InjectiveApp, func(), error) {
 		return nil, nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
-	injectiveApp := simapp.Setup(false, simtestutil.AppOptionsMap{
-		flags.FlagHome: tempDir,
-	})
+	cfg := config.DefaultConfig()
+	cfg.Set(flags.FlagHome, tempDir)
+	injectiveApp := simapp.Setup(false, cfg)
 
 	cleanup := func() {
 		simapp.Cleanup(injectiveApp)

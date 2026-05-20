@@ -6,11 +6,13 @@ import (
 	"strings"
 
 	"cosmossdk.io/errors"
+	"cosmossdk.io/store/prefix"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	gethcommon "github.com/ethereum/go-ethereum/common"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 var _ types.QueryServer = &Keeper{}
@@ -138,19 +140,23 @@ func (k *Keeper) LastPendingBatchRequestByAddr(c context.Context, req *types.Que
 		return nil, errors.Wrap(sdkerrors.ErrInvalidRequest, "address invalid")
 	}
 
-	var pendingBatchReq *types.OutgoingTxBatch
-	k.IterateOutgoingTXBatches(ctx, func(_ []byte, batch *types.OutgoingTxBatch) (stop bool) {
-		tokenAddress := gethcommon.HexToAddress(batch.TokenContract)
-		foundConfirm := k.GetBatchConfirm(ctx, batch.BatchNonce, tokenAddress, addr) != nil
-		if !foundConfirm {
-			pendingBatchReq = batch
-			return true
+	var oldestBatch *types.OutgoingTxBatch
+	batchStore := prefix.NewStore(k.getStore(ctx), types.OutgoingTXBatchKey)
+	chaintypes.IterateSafe(batchStore.Iterator(nil, nil), func(_, value []byte) (stop bool) {
+		var batch types.OutgoingTxBatch
+		k.cdc.MustUnmarshal(value, &batch)
+
+		token := gethcommon.HexToAddress(batch.TokenContract)
+		if confirm := k.GetBatchConfirm(ctx, batch.BatchNonce, token, addr); confirm == nil {
+			// no confirm yet
+			oldestBatch = &batch
+			return true // stop iterating
 		}
 
 		return false
 	})
 
-	return &types.QueryLastPendingBatchRequestByAddrResponse{Batch: pendingBatchReq}, nil
+	return &types.QueryLastPendingBatchRequestByAddrResponse{Batch: oldestBatch}, nil
 }
 
 // OutgoingTxBatches queries the OutgoingTxBatches of the peggy module

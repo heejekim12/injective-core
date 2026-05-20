@@ -27,3 +27,6 @@ The `exchange` module enables the exchange of tokens on two types of markets:
 10. [Events](09_events.md)
 11. [Params](10_params.md)
 12. [MsgPrivilegedExecuteContract](11_msg_privileged_execute_contract.md)
+13. [Gas Heuristics](12_gas_heuristics.md)
+14. [Risk System (Cross Margin)](14_risk_system.md)
+15. [Errors](99_errors.md)

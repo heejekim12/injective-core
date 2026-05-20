@@ -24,7 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 
-	"github.com/InjectiveLabs/injective-core/cmd/injectived/config"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 )
 
 const (

@@ -36,7 +36,6 @@ import (
 	sdked25519 "github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/cosmos/cosmos-sdk/server"
-	"github.com/cosmos/cosmos-sdk/server/types"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	distrtypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
@@ -50,6 +49,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 	"github.com/InjectiveLabs/injective-core/injective-chain/crypto/ethsecp256k1"
 	exchangetypesv2 "github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 	peggytypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
@@ -76,15 +76,15 @@ func NewDevnetApp(
 	logger log.Logger,
 	db dbm.DB,
 	traceStore io.Writer,
-	appOpts servertypes.AppOptions,
+	cfg config.Config,
 ) servertypes.Application {
 	baseAppOptions := []func(*baseapp.BaseApp){
-		baseapp.SetIAVLDisableFastNode(cast.ToBool(appOpts.Get(server.FlagDisableIAVLFastNode))),
-		baseapp.SetChainID(cast.ToString(appOpts.Get(KeyNewChainID))),
+		baseapp.SetIAVLDisableFastNode(cfg.IAVLDisableFastNode),
+		baseapp.SetChainID(cast.ToString(cfg.Get(KeyNewChainID))),
 	}
 
 	// first upgrade store if needed
-	upgradeName, ok := appOpts.Get(KeyTriggerTestnetUpgrade).(string)
+	upgradeName, ok := cfg.Get(KeyTriggerTestnetUpgrade).(string)
 	if ok && upgradeName != "" {
 		latestHeight := rootmulti.GetLatestVersion(db)
 
@@ -103,14 +103,14 @@ func NewDevnetApp(
 	}
 
 	// Create an app and type cast to an SimApp
-	app := NewInjectiveApp(logger, db, traceStore, true, appOpts, baseAppOptions...)
+	app := NewInjectiveApp(logger, db, traceStore, true, cfg, baseAppOptions...)
 
-	devnetOverridesFile, ok := appOpts.Get(KeyCustomOverrides).(string)
+	devnetOverridesFile, ok := cfg.Get(KeyCustomOverrides).(string)
 	if !ok {
 		panic("overridesFile is not of type string")
 	}
 
-	devnetValidators, ok := appOpts.Get(KeyDevnetValidators).([]DevnetValidator)
+	devnetValidators, ok := cfg.Get(KeyDevnetValidators).([]DevnetValidator)
 	if !ok {
 		panic("devnetValidators is not an array of correct type")
 	}
@@ -123,20 +123,20 @@ func NewDevnetApp(
 // that the state in the data folder represents. The chainID of the local genesis file is modified to match the provided chainID.
 func Devnetify(
 	ctx *server.Context,
-	devnetAppCreator types.AppCreator,
+	devnetAppCreator config.InjAppCreator,
 	db dbm.DB,
 	traceWriter io.WriteCloser,
 	devnetValidators []DevnetValidator,
 	newChainID string,
-) (types.Application, error) {
-	config := ctx.Config
+) (servertypes.Application, error) {
+	cfg := ctx.Config
 
 	if len(devnetValidators) == 0 {
 		return nil, errors.New("no validators provided")
 	}
 
 	// Modify app genesis chain ID and save to genesis file.
-	genFilePath := config.GenesisFile()
+	genFilePath := cfg.GenesisFile()
 	appGen, err := genutiltypes.AppGenesisFromFile(genFilePath)
 	if err != nil {
 		return nil, err
@@ -149,7 +149,7 @@ func Devnetify(
 		return nil, err
 	}
 	// remove hash from StateDB since it will not match to genesis hash anymore
-	stateDB, err := cmtcfg.DefaultDBProvider(&cmtcfg.DBContext{ID: "state", Config: config})
+	stateDB, err := cmtcfg.DefaultDBProvider(&cmtcfg.DBContext{ID: "state", Config: cfg})
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +160,7 @@ func Devnetify(
 	}
 
 	// Regenerate addrbook.json to prevent peers on old network from causing error logs.
-	addrBookPath := filepath.Join(config.RootDir, "config", "addrbook.json")
+	addrBookPath := filepath.Join(cfg.RootDir, "config", "addrbook.json")
 	if err := os.Remove(addrBookPath); err != nil && !os.IsNotExist(err) {
 		return nil, errors.Wrap(err, "failed to remove existing addrbook.json")
 	}
@@ -171,10 +171,10 @@ func Devnetify(
 	}
 
 	// Load the comet genesis doc provider.
-	genDocProvider := node.DefaultGenesisDocProviderFunc(config)
+	genDocProvider := node.DefaultGenesisDocProviderFunc(cfg)
 
 	// Initialize blockStore and stateDB.
-	blockStoreDB, err := cmtcfg.DefaultDBProvider(&cmtcfg.DBContext{ID: "blockstore", Config: config})
+	blockStoreDB, err := cmtcfg.DefaultDBProvider(&cmtcfg.DBContext{ID: "blockstore", Config: cfg})
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +183,7 @@ func Devnetify(
 	defer blockStore.Close()
 
 	stateStore := sm.NewStore(stateDB, sm.StoreOptions{
-		DiscardABCIResponses: config.Storage.DiscardABCIResponses,
+		DiscardABCIResponses: cfg.Storage.DiscardABCIResponses,
 	})
 
 	state, genDoc, err := node.LoadStateFromDBOrGenesisDocProvider(stateDB, genDocProvider, "")
@@ -191,7 +191,11 @@ func Devnetify(
 		return nil, err
 	}
 
-	devnetApp := devnetAppCreator(ctx.Logger, db, traceWriter, ctx.Viper)
+	appcfg, err := config.GetConfig(ctx.Viper)
+	if err != nil {
+		panic(err)
+	}
+	devnetApp := devnetAppCreator(ctx.Logger, db, traceWriter, appcfg)
 
 	// We need to create a temporary proxyApp to get the initial state of the application.
 	// Depending on how the node was stopped, the application height can differ from the blockStore height.
@@ -360,7 +364,7 @@ func Devnetify(
 
 	// We need to ensure that priv_validator_state.json is set to first round, this prevent cometbft from crashing
 	// In cases when we are copying a state from a previous network, that is alrady on round > 0
-	pv := privval.LoadFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile())
+	pv := privval.LoadFilePV(cfg.PrivValidatorKeyFile(), cfg.PrivValidatorStateFile())
 	pv.LastSignState.Height = state.LastBlockHeight - 1
 	pv.LastSignState.Round = 0
 	pv.LastSignState.Step = 0

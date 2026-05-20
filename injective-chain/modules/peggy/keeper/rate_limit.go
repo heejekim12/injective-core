@@ -62,12 +62,15 @@ func (k *Keeper) CheckRateLimit(
 	quantity := entireWithdrawAmountSoFar.ToLegacyDec()
 	quantity = quantity.Quo(sdkmath.LegacyNewDec(10).Power(uint64(rateLimit.TokenDecimals)))
 
-	valueInUSD := k.OracleKeeper.GetPythPrice(ctx, rateLimit.TokenPriceId, "USD")
-	if valueInUSD == nil {
+	// Pyth price IDs encode the quote denomination (e.g. a BTC/USD price ID always stores a USD price),
+	// so PriceState.Price is already USD-denominated and can be compared directly to RateLimitUsd.
+	pythPriceState := k.OracleKeeper.GetPythPriceState(ctx, gethcommon.HexToHash(rateLimit.TokenPriceId))
+	if pythPriceState == nil || pythPriceState.PriceState.Price.IsNil() || !pythPriceState.PriceState.Price.IsPositive() {
+		// todo(dusan): perform check during MsgServer CreateRateLimit?
 		return errors.New("nil Pyth price")
 	}
 
-	notional := quantity.Mul(*valueInUSD)
+	notional := quantity.Mul(pythPriceState.PriceState.Price)
 	if notional.GTE(rateLimit.RateLimitUsd) {
 		return sdkerrors.Wrapf(ErrRateLimitOverflow, "configured limit: %sUSD", rateLimit.RateLimitUsd.String())
 	}
@@ -136,17 +139,15 @@ func (k *Keeper) DeleteRateLimit(ctx sdk.Context, tokenAddress gethcommon.Addres
 func (k *Keeper) GetRateLimits(ctx sdk.Context) []*types.RateLimit {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetRateLimits")()
 
-	store := k.getStore(ctx)
-	rateLimitsStore := prefix.NewStore(store, types.RateLimitKey)
-	iter := rateLimitsStore.Iterator(nil, nil)
-	defer iter.Close()
-
 	rateLimits := make([]*types.RateLimit, 0)
-	for ; iter.Valid(); iter.Next() {
+	rateLimitsStore := prefix.NewStore(k.getStore(ctx), types.RateLimitKey)
+	chaintypes.IterateSafe(rateLimitsStore.Iterator(nil, nil), func(_, value []byte) (stop bool) {
 		var rateLimit types.RateLimit
-		k.cdc.MustUnmarshal(iter.Value(), &rateLimit)
+		k.cdc.MustUnmarshal(value, &rateLimit)
+
 		rateLimits = append(rateLimits, &rateLimit)
-	}
+		return false
+	})
 
 	return rateLimits
 }

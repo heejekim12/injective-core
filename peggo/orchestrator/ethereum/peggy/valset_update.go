@@ -97,9 +97,13 @@ func (s *peggyContract) SendEthValsetUpdate(
 	}
 
 	// Checking in pending txs(mempool) if tx with same input is already submitted
+	s.mtx.Lock()
 	if s.pendingTxInputList.IsPendingTxInput(txData, s.pendingTxWaitDuration) {
+		s.mtx.Unlock()
 		return nil, errors.New("Transaction with same valset input data is already present in mempool")
 	}
+
+	s.mtx.Unlock()
 
 	hash, err := s.SendTx(ctx, s.peggyAddress, txData)
 	if err != nil {

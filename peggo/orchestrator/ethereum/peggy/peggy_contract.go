@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/InjectiveLabs/metrics/v2"
@@ -110,6 +111,7 @@ type peggyContract struct {
 	peggyAddress common.Address
 	ethPeggy     *wrappers.Peggy
 
+	mtx                   sync.Mutex
 	pendingTxInputList    PendingTxInputList
 	pendingTxWaitDuration time.Duration
 

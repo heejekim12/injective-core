@@ -5,10 +5,12 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/keeper"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 var (
@@ -38,13 +40,14 @@ func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
 
 	params := h.k.GetParams(ctx)
 
-	h.slashing(ctx, params)
+	h.jailing(ctx, params)
 	h.attestationTally(ctx)
 	h.cleanupTimedOutBatches(ctx)
 	h.createValsets(ctx)
 	h.pruneValsets(ctx, params)
 	h.pruneAttestations(ctx)
 	h.includeRateLimitTransfers(ctx)
+	h.cleanUpOldConfirmations(ctx)
 }
 
 func (h *BlockHandler) createValsets(ctx sdk.Context) {
@@ -55,7 +58,7 @@ func (h *BlockHandler) createValsets(ctx sdk.Context) {
 	// 1. If there are no valset requests, create a new one.
 	// 2. If there is at least one validator who started unbonding in current block. (we persist last unbonded block height in hooks.go)
 	//      This will make sure the unbonding validator has to provide an attestation to a new Valset
-	//	    that excludes him before he completely Unbonds.  Otherwise he will be slashed
+	//	    that excludes him before he completely Unbonds.  Otherwise he will be jailed
 	// 3. If power change between validators of CurrentValset and latest valset request is > 5%
 
 	// get the last valsets to compare against
@@ -104,11 +107,11 @@ func (h *BlockHandler) pruneAttestations(ctx sdk.Context) {
 	}
 }
 
-func (h *BlockHandler) slashing(ctx sdk.Context, params *types.Params) {
-	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.slashing")()
+func (h *BlockHandler) jailing(ctx sdk.Context, params *types.Params) {
+	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.jailing")()
 
-	h.valsetSlashing(ctx, params)
-	h.batchSlashing(ctx, params)
+	h.valsetJailing(ctx, params)
+	h.batchJailing(ctx, params)
 
 	// See https://github.com/Gravity-Bridge/Gravity-Bridge/blob/main/spec/slashing-spec.md#gravslash-05-failure-to-submit-eth-oracle-claims---intentionally-not-implemented
 	// if params.ClaimSlashingEnabled {
@@ -190,20 +193,20 @@ func (h *BlockHandler) cleanupTimedOutBatches(ctx sdk.Context) {
 	}
 }
 
-func (h *BlockHandler) valsetSlashing(ctx sdk.Context, params *types.Params) {
-	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.valsetSlashing")()
+func (h *BlockHandler) valsetJailing(ctx sdk.Context, params *types.Params) { //nolint
+	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.valsetJailing")()
 
 	maxHeight := uint64(0)
 
-	// don't slash in the beginning before there aren't even SignedValsetsWindow blocks yet
+	// don't jail in the beginning before there aren't even SignedValsetsWindow blocks yet
 	if uint64(ctx.BlockHeight()) > params.SignedValsetsWindow {
 		maxHeight = uint64(ctx.BlockHeight()) - params.SignedValsetsWindow
 	} else {
-		// we can't slash anyone if SignedValsetWindow blocks have not passed
+		// we can't jail anyone if SignedValsetWindow blocks have not passed
 		return
 	}
 
-	unslashedValsets := h.k.GetUnslashedValsets(ctx, maxHeight)
+	unjailedValsets := h.k.GetUnjailedValsets(ctx, maxHeight)
 
 	wasInValset := func(addr common.Address, vs *types.Valset) bool {
 		for _, member := range vs.Members {
@@ -215,11 +218,11 @@ func (h *BlockHandler) valsetSlashing(ctx sdk.Context, params *types.Params) {
 		return false
 	}
 
-	// unslashedValsets are sorted by nonce in ASC order
-	for _, vs := range unslashedValsets {
+	// unjailed valsets are sorted by nonce in ASC order
+	for _, vs := range unjailedValsets {
 		confirms := h.k.GetValsetConfirms(ctx, vs.Nonce)
 
-		// SLASH BONDED VALIDATORS who didn't attest valset request
+		// JAIL BONDED VALIDATORS who didn't attest valset request
 		currentBondedSet, _ := h.k.StakingKeeper.GetBondedValidatorsByPower(ctx)
 
 		for i := range currentBondedSet {
@@ -229,7 +232,7 @@ func (h *BlockHandler) valsetSlashing(ctx sdk.Context, params *types.Params) {
 			ethAddress, exists := h.k.GetEthAddressByValidator(ctx, valAddr)
 
 			exist := err == nil
-			//  Slash validator ONLY if he joined after valset is created
+			//  jail validator ONLY if he joined after valset is created
 			if exist && (valSigningInfo.StartHeight < int64(vs.Height) || wasInValset(ethAddress, vs)) {
 				// Check if validator has confirmed valset or not
 				found := false
@@ -261,18 +264,23 @@ func (h *BlockHandler) valsetSlashing(ctx sdk.Context, params *types.Params) {
 			}
 		}
 
-		// SLASH UNBONDING VALIDATORS who didn't attest valset request
+		// JAIL UNBONDING VALIDATORS who didn't attest valset request
 		stakingParams, _ := h.k.StakingKeeper.GetParams(ctx)
 		blockTime := ctx.BlockTime().Add(stakingParams.UnbondingTime)
 		blockHeight := ctx.BlockHeight()
+
+		// a list of lists when validators started unbonding
+		unbondedValidators := make([]stakingtypes.ValAddresses, 0)
 		unbondingValIterator, _ := h.k.StakingKeeper.ValidatorQueueIterator(ctx, blockTime, blockHeight)
-		defer unbondingValIterator.Close()
+		chaintypes.IterateSafe(unbondingValIterator, func(_, v []byte) (stop bool) {
+			unbondedValidators = append(unbondedValidators, h.k.DeserializeValidatorIterator(v))
+			return false
+		})
 
 		// All unbonding validators
-		for ; unbondingValIterator.Valid(); unbondingValIterator.Next() {
-			unbondingValidators := h.k.DeserializeValidatorIterator(unbondingValIterator.Value())
-			for _, valAddr := range unbondingValidators.Addresses {
-				addr, err := sdk.ValAddressFromBech32(valAddr)
+		for _, validators := range unbondedValidators {
+			for _, v := range validators.Addresses {
+				addr, err := sdk.ValAddressFromBech32(v)
 				if err != nil {
 					panic(err)
 				}
@@ -280,10 +288,16 @@ func (h *BlockHandler) valsetSlashing(ctx sdk.Context, params *types.Params) {
 				validator, _ := h.k.StakingKeeper.GetValidator(ctx, addr)
 				valConsAddr, _ := validator.GetConsAddr()
 				valSigningInfo, err := h.k.SlashingKeeper.GetValidatorSigningInfo(ctx, valConsAddr)
+				if err != nil {
+					// we do nothing but it is unusual
+					h.k.Logger(ctx).Warn("missing signing info for unbonding validator", "validator", v, "err", err)
+					continue
+				}
 
-				exist := err == nil
 				// Only slash validators who joined after valset is created and they are unbonding and UNBOND_SLASHING_WINDOW didn't passed
-				if exist && valSigningInfo.StartHeight < int64(vs.Height) && validator.IsUnbonding() && vs.Height < uint64(validator.UnbondingHeight)+params.UnbondSlashingValsetsWindow {
+				wasValidatorBeforeValset := valSigningInfo.StartHeight < int64(vs.Height)
+				valsetCaughtByUnbondingWindow := vs.Height < uint64(validator.UnbondingHeight)+params.UnbondSlashingValsetsWindow
+				if validator.IsUnbonding() && wasValidatorBeforeValset && valsetCaughtByUnbondingWindow {
 					// Check if validator has confirmed valset or not
 					found := false
 					for _, conf := range confirms {
@@ -297,7 +311,6 @@ func (h *BlockHandler) valsetSlashing(ctx sdk.Context, params *types.Params) {
 					// jail validators for not confirming valsets
 					if !found {
 						consPower := validator.ConsensusPower(h.k.StakingKeeper.PowerReduction(ctx))
-
 						if !validator.IsJailed() {
 							_ = h.k.StakingKeeper.Jail(ctx, valConsAddr)
 							_ = ctx.EventManager().EmitTypedEvent(&types.EventValidatorJailed{
@@ -313,35 +326,34 @@ func (h *BlockHandler) valsetSlashing(ctx sdk.Context, params *types.Params) {
 			}
 		}
 
-		// then we set the latest slashed valset  nonce
-		h.k.SetLastSlashedValsetNonce(ctx, vs.Nonce)
+		// then we set the latest jailed valset  nonce
+		h.k.SetLastJailedValsetNonce(ctx, vs.Nonce)
 	}
 }
 
-func (h *BlockHandler) batchSlashing(ctx sdk.Context, params *types.Params) {
-	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.batchSlashing")()
+func (h *BlockHandler) batchJailing(ctx sdk.Context, params *types.Params) { //nolint
+	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.batchJailing")()
 
 	// #2 condition
 	// We look through the full bonded set (not just the active set, include unbonding validators)
-	// and we slash users who haven't signed a batch confirmation that is >15hrs in blocks old
+	// and we jail users who haven't signed a batch confirmation that is >15hrs in blocks old
 	maxHeight := uint64(0)
 
-	// don't slash in the beginning before there aren't even SignedBatchesWindow blocks yet
+	// don't jail in the beginning before there aren't even SignedBatchesWindow blocks yet
 	if uint64(ctx.BlockHeight()) > params.SignedBatchesWindow {
 		maxHeight = uint64(ctx.BlockHeight()) - params.SignedBatchesWindow
 	} else {
-		// we can't slash anyone if this window has not yet passed
+		// we can't jail anyone if this window has not yet passed
 		return
 	}
 
-	unslashedBatches := h.k.GetUnslashedBatches(ctx, maxHeight)
-
-	for _, batch := range unslashedBatches {
-		// SLASH BONDED VALIDTORS who didn't attest batch requests
+	unjailedBatches := h.k.GetUnjailedBatches(ctx, maxHeight)
+	for _, batch := range unjailedBatches {
+		// JAIL BONDED VALIDATORS who didn't attest batch requests
 		currentBondedSet, _ := h.k.StakingKeeper.GetBondedValidatorsByPower(ctx)
 		confirms := h.k.GetBatchConfirmByNonceAndTokenContract(ctx, batch.BatchNonce, common.HexToAddress(batch.TokenContract))
 		for i := range currentBondedSet {
-			// Don't slash validators who joined after batch is created
+			// Don't jail validators who joined after batch is created
 			consAddr, _ := currentBondedSet[i].GetConsAddr()
 
 			valSigningInfo, err := h.k.SlashingKeeper.GetValidatorSigningInfo(ctx, consAddr)
@@ -378,8 +390,8 @@ func (h *BlockHandler) batchSlashing(ctx sdk.Context, params *types.Params) {
 			}
 		}
 
-		// then we set the latest slashed batch block
-		h.k.SetLastSlashedBatchBlock(ctx, batch.Block)
+		// then we set the latest jailed batch block
+		h.k.SetLastJailedBatchBlock(ctx, batch.Block)
 	}
 }
 
@@ -391,7 +403,7 @@ func (h *BlockHandler) pruneValsets(ctx sdk.Context, params *types.Params) {
 	// last observed nonce, they can't be submitted any longer
 	//
 	// Only prune valsets after the signed valsets window has passed
-	// so that slashing can occur the block before we remove them
+	// so that jailing can occur the block before we remove them
 	lastObserved := h.k.GetLastObservedValset(ctx)
 	currentBlock := uint64(ctx.BlockHeight())
 	tooEarly := currentBlock < params.SignedValsetsWindow
@@ -455,4 +467,11 @@ func (h *BlockHandler) includeRateLimitTransfers(ctx sdk.Context) {
 
 		h.k.SetNetOutflow(ctx, tokenAddress, newNetOutflow)
 	}
+}
+
+func (h *BlockHandler) cleanUpOldConfirmations(ctx sdk.Context) {
+	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.cleanUpOldConfirmations")()
+
+	h.k.PruneOldValsetConfirms(ctx)
+	h.k.PruneOldBatchConfirms(ctx)
 }

@@ -81,7 +81,8 @@ func (e *DerivativeBatchAuctionExecutor) buildOrderbooks(ctx sdk.Context) {
 	e.ensureFilteredOrders(ctx)
 
 	e.buyOrderbook = derivative.NewLimitOrderbook(
-		e.keeper, ctx, true, false,
+		e.keeper, ctx, true,
+		false, // not a liquidation
 		e.ordersToCancel.TransientLimitBuyOrders,
 		e.market, e.markPrice, e.funding,
 		e.currentOpenNotional, e.openNotionalCap,
@@ -89,7 +90,8 @@ func (e *DerivativeBatchAuctionExecutor) buildOrderbooks(ctx sdk.Context) {
 	)
 
 	e.sellOrderbook = derivative.NewLimitOrderbook(
-		e.keeper, ctx, false, false,
+		e.keeper, ctx, false,
+		false, // not a liquidation
 		e.ordersToCancel.TransientLimitSellOrders,
 		e.market, e.markPrice, e.funding,
 		e.currentOpenNotional, e.openNotionalCap,
@@ -133,6 +135,7 @@ func (e *DerivativeBatchAuctionExecutor) processMatchResult(ctx sdk.Context, mat
 	defer e.meter.FuncTiming(&ctx, "DerivativeBatchAuctionExecutor.processMatchResult")()
 
 	feeDiscountConfig := e.keeper.GetFeeDiscountConfigForMarket(ctx, e.market.MarketID(), stakingInfo)
+	isCrossSubaccount := makeIsCrossSubaccountFn(ctx, e.keeper)
 
 	// Process orderbook fills and get expansion data
 	expansionData := e.processOrderbookFills(ctx, matchResult.ClearingPrice, matchResult.ClearingQuantity, feeDiscountConfig)
@@ -155,6 +158,7 @@ func (e *DerivativeBatchAuctionExecutor) processMatchResult(ctx sdk.Context, mat
 		e.markPrice,
 		e.funding,
 		e.positionStates,
+		isCrossSubaccount,
 	)
 }
 
@@ -245,4 +249,8 @@ func (e *DerivativeBatchAuctionExecutor) processSideOrderbookFills(
 	}
 
 	expansionData.OpenInterestDelta = expansionData.OpenInterestDelta.Add(orderbook.GetOpenInterestDelta())
+}
+
+func makeIsCrossSubaccountFn(ctx sdk.Context, keeper derivative.DerivativeKeeper) func(common.Hash) bool {
+	return keeper.RiskEngine().MakeIsCrossSubaccountFn(ctx)
 }

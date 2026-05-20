@@ -5,7 +5,6 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"os"
 	"path/filepath"
 
 	autocliv1 "cosmossdk.io/api/cosmos/autocli/v1"
@@ -21,24 +20,18 @@ import (
 	"cosmossdk.io/x/feegrant"
 	feegrantkeeper "cosmossdk.io/x/feegrant/keeper"
 	feegrantmodule "cosmossdk.io/x/feegrant/module"
+	txsigning "cosmossdk.io/x/tx/signing"
 	"cosmossdk.io/x/upgrade"
 	upgradekeeper "cosmossdk.io/x/upgrade/keeper"
 	upgradetypes "cosmossdk.io/x/upgrade/types"
 	"github.com/CosmWasm/wasmd/x/wasm"
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
-	hyperlanecore "github.com/bcp-innovations/hyperlane-cosmos/x/core"
-	hyperlanecorekeeper "github.com/bcp-innovations/hyperlane-cosmos/x/core/keeper"
-	hyperlanecoretypes "github.com/bcp-innovations/hyperlane-cosmos/x/core/types"
-	hyperlanewarp "github.com/bcp-innovations/hyperlane-cosmos/x/warp"
-	hyperlanewarpkeeper "github.com/bcp-innovations/hyperlane-cosmos/x/warp/keeper"
-	hyperlanewarptypes "github.com/bcp-innovations/hyperlane-cosmos/x/warp/types"
 	abci "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/libs/pubsub"
 	dbm "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	"github.com/cosmos/cosmos-sdk/client"
-	"github.com/cosmos/cosmos-sdk/client/flags"
 	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
 	nodeservice "github.com/cosmos/cosmos-sdk/client/grpc/node"
 	"github.com/cosmos/cosmos-sdk/codec"
@@ -48,7 +41,6 @@ import (
 	"github.com/cosmos/cosmos-sdk/server"
 	"github.com/cosmos/cosmos-sdk/server/api"
 	"github.com/cosmos/cosmos-sdk/server/config"
-	servertypes "github.com/cosmos/cosmos-sdk/server/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
@@ -145,9 +137,10 @@ import (
 
 	"github.com/InjectiveLabs/injective-core/client/docs"
 	"github.com/InjectiveLabs/injective-core/injective-chain/app/ante"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/ante/eip712"
+	appconfig "github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 	"github.com/InjectiveLabs/injective-core/injective-chain/app/govcli"
 	injcodectypes "github.com/InjectiveLabs/injective-core/injective-chain/codec/types"
-	"github.com/InjectiveLabs/injective-core/injective-chain/hyperlane"
 	exchangelane "github.com/InjectiveLabs/injective-core/injective-chain/lanes/exchange"
 	governancelane "github.com/InjectiveLabs/injective-core/injective-chain/lanes/governance"
 	oraclelane "github.com/InjectiveLabs/injective-core/injective-chain/lanes/oracle"
@@ -164,6 +157,7 @@ import (
 	evmkeeper "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/keeper"
 	bankpc "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/precompiles/bank"
 	exchangepc "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/precompiles/exchange"
+	oraclepc "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/precompiles/oracle"
 	stakingpc "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/precompiles/staking"
 	cosmostracing "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/tracing"
 	evmtypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/types"
@@ -199,21 +193,11 @@ import (
 
 func init() {
 	chaintypes.InitSDKConfig()
-
-	userHomeDir, err := os.UserHomeDir()
-	if err != nil {
-		panic(err)
-	}
-
-	DefaultNodeHome = filepath.Join(userHomeDir, ".injectived")
 }
 
 const appName = "injectived"
 
 var (
-	// DefaultNodeHome default home directories for the application daemon
-	DefaultNodeHome string
-
 	// ModuleBasics defines the module BasicManager is in charge of setting up basic,
 	// non-dependant module elements, such as codec registration
 	// and genesis verification.
@@ -242,8 +226,6 @@ var (
 		feegrantmodule.AppModuleBasic{},
 		authzmodule.AppModuleBasic{},
 		packetforward.AppModuleBasic{},
-		hyperlanecore.AppModule{},
-		hyperlanewarp.AppModule{},
 
 		downtimedetectormodule.AppModuleBasic{},
 		insurance.AppModuleBasic{},
@@ -283,8 +265,6 @@ var (
 		wasmxtypes.ModuleName:          {authtypes.Burner},
 		evmtypes.ModuleName:            {authtypes.Minter, authtypes.Burner}, // used for secure addition and subtraction of balance using module account
 		erc20types.ModuleName:          {authtypes.Minter, authtypes.Burner}, // to mint and burn erc20 denom
-		hyperlanecoretypes.ModuleName:  nil,
-		hyperlanewarptypes.ModuleName:  {authtypes.Minter, authtypes.Burner},
 	}
 
 	// module accounts that are allowed to receive tokens
@@ -362,10 +342,6 @@ type InjectiveApp struct {
 	ScopedICAHostKeeper  capabilitykeeper.ScopedKeeper
 	ScopedWasmKeeper     capabilitykeeper.ScopedKeeper
 
-	// hyperlane keepers
-	HyperlaneCoreKeeper hyperlanecorekeeper.Keeper
-	HyperlaneWarpKeeper hyperlanewarpkeeper.Keeper
-
 	BasicModuleManager module.BasicManager
 	mm                 *module.Manager
 	sm                 *module.SimulationManager
@@ -387,18 +363,18 @@ func NewInjectiveApp(
 	db dbm.DB,
 	traceStore io.Writer,
 	loadLatest bool,
-	appOpts servertypes.AppOptions,
+	cfg appconfig.Config,
 	baseAppOptions ...func(*baseapp.BaseApp),
 ) *InjectiveApp {
 	authority := authtypes.NewModuleAddress(govtypes.ModuleName).String()
-	wasmConfig, err := wasm.ReadWasmConfig(appOpts)
+	wasmConfig, err := wasm.ReadWasmConfig(cfg)
 	if err != nil {
 		panic("error while reading wasm config: " + err.Error())
 	}
 
 	app := initInjectiveApp(appName, logger, db, traceStore, baseAppOptions...)
 
-	app.initKeepers(authority, appOpts, wasmConfig)
+	app.initKeepers(authority, cfg, wasmConfig)
 	app.initManagers()
 
 	app.registerUpgradeHandlers()
@@ -449,23 +425,20 @@ func NewInjectiveApp(
 	app.SetBeginBlocker(app.BeginBlocker)
 	app.SetEndBlocker(app.EndBlocker)
 
-	// TODO: xlab: move srvflags.EVMTracer
-	tracer := cast.ToString(appOpts.Get("evm.tracer"))
-
 	switch {
-	case tracer == "access_list":
+	case cfg.EVM.Tracer == "access_list":
 		panic("access_list tracer is not supported")
-	case tracer != "":
-		liveTracer := evmtypes.NewTracer(tracer, nil, ethparams.Rules{})
+	case cfg.EVM.Tracer != "":
+		liveTracer := evmtypes.NewTracer(cfg.EVM.Tracer, nil, ethparams.Rules{})
 		app.EvmKeeper.SetTracer(&cosmostracing.Hooks{
 			Hooks: liveTracer.Hooks,
 		})
 	}
 
 	// use Injective's custom AnteHandler
-	skipAnteHandlers := cast.ToBool(appOpts.Get("SkipAnteHandlers"))
+	skipAnteHandlers := cast.ToBool(cfg.Get(appconfig.FlagSkipAnteHandlers))
 	if !skipAnteHandlers {
-		maxEthTxGasWanted := cast.ToUint64(appOpts.Get("evm.max-tx-gas-wanted")) // TODO: xlab: move srvflags.EVMMaxTxGasWanted
+		maxEthTxGasWanted := cfg.EVM.MaxTxGasWanted
 		anteHandler := ante.NewAnteHandler(ante.HandlerOptions{
 			HandlerOptions: authante.HandlerOptions{
 				AccountKeeper:          app.AccountKeeper,
@@ -543,7 +516,7 @@ func NewInjectiveApp(
 	app.EventPublisher = chainstreamserver.NewPublisher(app.StreamEvents, bus)
 	app.ChainStreamServer = chainstreamserver.NewChainStreamServer(
 		bus,
-		appOpts,
+		cfg.ChainStream,
 		app.ExchangeKeeper,
 		&app.TxFeesKeeper,
 		app.CreateQueryContext,
@@ -579,8 +552,6 @@ func initInjectiveApp(
 			capabilitytypes.StoreKey, feegrant.StoreKey, authzkeeper.StoreKey,
 			icahosttypes.StoreKey, ibcfeetypes.StoreKey, crisistypes.StoreKey,
 			consensustypes.StoreKey, packetforwardtypes.StoreKey, ibchookstypes.StoreKey,
-			// Hyperlane keys
-			hyperlanecoretypes.ModuleName, hyperlanewarptypes.ModuleName,
 			// Injective keys
 			downtimedetectortypes.StoreKey,
 			exchangetypes.StoreKey,
@@ -1011,8 +982,8 @@ func (app *InjectiveApp) RegisterTendermintService(clientCtx client.Context) {
 	cmtservice.RegisterTendermintService(clientCtx, app.BaseApp.GRPCQueryRouter(), app.interfaceRegistry, app.Query)
 }
 
-func (app *InjectiveApp) initKeepers(authority string, appOpts servertypes.AppOptions, wasmConfig wasmtypes.WasmConfig) { //nolint:revive // this is fine
-	homePath := cast.ToString(appOpts.Get(flags.FlagHome))
+func (app *InjectiveApp) initKeepers(authority string, cfg appconfig.Config, wasmConfig wasmtypes.WasmConfig) { //nolint:revive // this is fine
+	homePath := cfg.GetHome()
 	dataDir := filepath.Join(homePath, "data")
 
 	app.ParamsKeeper = initParamsKeeper(
@@ -1023,7 +994,7 @@ func (app *InjectiveApp) initKeepers(authority string, appOpts servertypes.AppOp
 	)
 
 	skipUpgradeHeights := map[int64]bool{}
-	for _, h := range cast.ToIntSlice(appOpts.Get(server.FlagUnsafeSkipUpgrades)) {
+	for _, h := range cast.ToIntSlice(cfg.Get(server.FlagUnsafeSkipUpgrades)) {
 		skipUpgradeHeights[int64(h)] = true
 	}
 
@@ -1076,6 +1047,7 @@ func (app *InjectiveApp) initKeepers(authority string, appOpts servertypes.AppOp
 	// Legacy app wiring: to enable SignMode_SIGN_MODE_TEXTUAL app tx config must be updated after bank keeper init
 	txConfigOpts := authtx.ConfigOptions{
 		EnabledSignModes:           append(authtx.DefaultSignModes, signing.SignMode_SIGN_MODE_TEXTUAL),
+		CustomSignModes:            []txsigning.SignModeHandler{eip712.NewSignModeHandler(app.codec)},
 		TextualCoinMetadataQueryFn: tx.NewBankKeeperCoinMetadataQueryFn(app.BankKeeper),
 	}
 
@@ -1136,7 +1108,7 @@ func (app *InjectiveApp) initKeepers(authority string, appOpts servertypes.AppOp
 	app.CrisisKeeper = crisiskeeper.NewKeeper(
 		app.codec,
 		runtime.NewKVStoreService(app.keys[crisistypes.StoreKey]),
-		cast.ToUint(appOpts.Get(server.FlagInvCheckPeriod)),
+		cast.ToUint(cfg.Get(server.FlagInvCheckPeriod)),
 		app.BankKeeper,
 		authtypes.FeeCollectorName,
 		authority,
@@ -1209,8 +1181,16 @@ func (app *InjectiveApp) initKeepers(authority string, appOpts servertypes.AppOp
 					storetypes.TransientGasConfig(),
 				)
 			},
+			func(_ sdk.Context, _ ethparams.Rules) vm.PrecompiledContract {
+				// it's OK to reference OracleKeeper here since it's inside a generator
+				// function that will only be called at tx time, after full app init.
+				return oraclepc.NewContract(
+					&app.OracleKeeper,
+					storetypes.TransientGasConfig(),
+				)
+			},
 		},
-		cast.ToBool(appOpts.Get("evm.enable-grpc-tracing")),
+		cfg.EVM.EnableGRPCTracing,
 	)
 
 	app.OracleKeeper = oraclekeeper.NewKeeper(
@@ -1363,14 +1343,13 @@ func (app *InjectiveApp) initKeepers(authority string, appOpts servertypes.AppOp
 	app.PacketForwardKeeper.SetTransferKeeper(app.TransferKeeper)
 
 	// this line is used by starport scaffolding # stargate/app/keeperDefinition
-	wasmDir := filepath.Join(cast.ToString(appOpts.Get(flags.FlagHome)), "wasm")
+	wasmDir := filepath.Join(cfg.GetHome(), "wasm")
 
 	// The last arguments can contain custom message handlers, and custom query handlers,
 	// if we want to allow any custom callbacks
 	// See https://github.com/CosmWasm/cosmwasm/blob/main/docs/CAPABILITIES-BUILT-IN.md
 	availableCapabilities := append(wasmkeeper.BuiltInCapabilities(), "injective")
-	wasmOpts := GetWasmOpts(appOpts)
-	wasmOpts = append(wasmOpts, wasmbinding.RegisterCustomPlugins(
+	wasmOpts := append([]wasmkeeper.Option{}, wasmbinding.RegisterCustomPlugins(
 		app.codec,
 		&app.AuthzKeeper,
 		app.BankKeeper.(bankkeeper.BaseKeeper),
@@ -1513,35 +1492,6 @@ func (app *InjectiveApp) initKeepers(authority string, appOpts servertypes.AppOp
 	app.GovKeeper.SetLegacyRouter(govRouter)
 	app.ExchangeKeeper.SetWasmKeepers(app.WasmKeeper, &app.WasmxKeeper)
 	app.ExchangeKeeper.SetGovKeeper(app.GovKeeper)
-
-	app.HyperlaneCoreKeeper = hyperlanecorekeeper.NewKeeper(
-		app.codec,
-		app.AccountKeeper.AddressCodec(),
-		runtime.NewKVStoreService(app.keys[hyperlanecoretypes.ModuleName]),
-		authority,
-		app.BankKeeper,
-	)
-
-	enabledTokens32 := []int32{
-		int32(hyperlanewarptypes.HYP_TOKEN_TYPE_COLLATERAL),
-		int32(hyperlanewarptypes.HYP_TOKEN_TYPE_SYNTHETIC),
-	}
-	if enabledTokens := appOpts.Get(hyperlane.FlagEnabledTokens); enabledTokens != nil {
-		castedEnabledTokens := cast.ToIntSlice(enabledTokens)
-		enabledTokens32 = make([]int32, len(castedEnabledTokens))
-		for i, v := range castedEnabledTokens {
-			enabledTokens32[i] = int32(v)
-		}
-	}
-	app.HyperlaneWarpKeeper = hyperlanewarpkeeper.NewKeeper(
-		app.codec,
-		app.AccountKeeper.AddressCodec(),
-		runtime.NewKVStoreService(app.keys[hyperlanewarptypes.ModuleName]),
-		authority,
-		app.BankKeeper,
-		&app.HyperlaneCoreKeeper,
-		enabledTokens32,
-	)
 }
 
 func (app *InjectiveApp) initManagers() { //nolint:revive // this is fine
@@ -1594,9 +1544,6 @@ func (app *InjectiveApp) initManagers() { //nolint:revive // this is fine
 		// EVM app modules
 		evm.NewAppModule(app.EvmKeeper, app.AccountKeeper, app.GetSubspace(evmtypes.ModuleName)),
 		erc20module.NewAppModule(app.ERC20Keeper),
-		// Hyperlane app modules
-		hyperlanecore.NewAppModule(app.codec, &app.HyperlaneCoreKeeper),
-		hyperlanewarp.NewAppModule(app.codec, app.HyperlaneWarpKeeper),
 	)
 
 	// BasicModuleManager defines the module BasicManager is in charge of setting up basic,
@@ -1660,10 +1607,6 @@ func initParamsKeeper(
 	paramsKeeper.Subspace(icahosttypes.SubModuleName).WithKeyTable(icahosttypes.ParamKeyTable())
 	paramsKeeper.Subspace(packetforwardtypes.ModuleName)
 
-	// hyperlane subspaces
-	paramsKeeper.Subspace(hyperlanecoretypes.ModuleName)
-	paramsKeeper.Subspace(hyperlanewarptypes.ModuleName)
-
 	// wasm subspace
 	paramsKeeper.Subspace(wasmtypes.ModuleName)
 	// injective subspaces
@@ -1710,10 +1653,6 @@ func initGenesisOrder() []string {
 		feegrant.ModuleName,
 		consensustypes.ModuleName,
 		packetforwardtypes.ModuleName,
-
-		// Hyperlane modules
-		hyperlanecoretypes.ModuleName,
-		hyperlanewarptypes.ModuleName,
 
 		// Injective modules
 		downtimedetectortypes.ModuleName,
@@ -1779,8 +1718,6 @@ func beginBlockerOrder() []string {
 		ibchookstypes.ModuleName,
 		wasmtypes.ModuleName,
 		wasmxtypes.ModuleName,
-		hyperlanecoretypes.ModuleName,
-		hyperlanewarptypes.ModuleName,
 	}
 }
 
@@ -1822,8 +1759,6 @@ func endBlockerOrder() []string {
 		packetforwardtypes.ModuleName,
 		wasmxtypes.ModuleName,
 		txfeestypes.ModuleName,
-		hyperlanecoretypes.ModuleName,
-		hyperlanewarptypes.ModuleName,
 		banktypes.ModuleName,
 		downtimedetectortypes.ModuleName,
 	}

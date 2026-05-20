@@ -1,11 +1,26 @@
 #!/bin/sh
 
 # REQUIRES FOUNDRY
-CONTRACTS_REPO_TAG=v1.17.2
+CONTRACTS_REPO_TAG=v1.20.0
 SOLC_VERSION=0.8.30
 OPTIMIZER=true
 OPTIMIZER_RUNS=200
 ABIGEN_VERSION=v1.16.3
+OPENZEPPELIN_REMAPPING="@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"
+
+CONTRACT_SOURCES="
+./src/CosmosTypes.sol
+./src/Bank.sol
+./src/FixedSupplyBankERC20.sol
+./src/MintBurnBankERC20.sol
+./src/Exchange.sol
+./src/tests/ExchangeTest.sol
+./src/tests/ExchangeProxy.sol
+./src/Staking.sol
+./src/tests/StakingTest.sol
+./src/Oracle.sol
+./src/tests/OracleTest.sol
+"
 
 pushd injective-chain/modules/evm/precompiles/bindings
 
@@ -14,10 +29,25 @@ echo "\n\n🦋 Building contracts [abi, bin]...\n\n"
 rm -fr solidity-contracts
 git clone --depth 1 --branch $CONTRACTS_REPO_TAG git@github.com:InjectiveLabs/solidity-contracts.git
 pushd solidity-contracts
-for file in $(find ./src -maxdepth 2 -name '*.sol'); do
+
+git submodule update --init --depth 1 lib/openzeppelin-contracts
+rm -rf .git .gitmodules lib/devtools lib/layerzero-v2 lib/morpho-blue-oracles lib/openzeppelin-contracts-upgradeable lib/pyth-crosschain
+cat > foundry.toml <<EOF
+[profile.default]
+evm_version = "shanghai"
+libs = ["lib"]
+out = "out"
+src = "src"
+
+remappings = [
+  "$OPENZEPPELIN_REMAPPING",
+]
+EOF
+
+for file in $CONTRACT_SOURCES; do
     CONTRACT=$(echo "${file##*/}" | sed 's/\.[^.]*$//')
     echo "\n\n🦋 $CONTRACT...\n\n"
-    forge build $file --extra-output-files bin --optimize $OPTIMIZER --optimizer-runs $OPTIMIZER_RUNS --use $SOLC_VERSION
+    forge build $file --extra-output-files bin --optimize $OPTIMIZER --optimizer-runs $OPTIMIZER_RUNS --use $SOLC_VERSION --remappings "$OPENZEPPELIN_REMAPPING"
     jq '.abi' ./out/$CONTRACT.sol/*.json > "./out/$CONTRACT.sol/$CONTRACT.abi"
 done
 popd
@@ -91,6 +121,17 @@ CONTRACT=StakingTest
 echo "\n\n🦋 $CONTRACT...\n\n"
 mkdir -p cosmos/precompile/staking/test && \
 ${abigen} --pkg staking --abi "$OUT_DIR/$CONTRACT.sol/$CONTRACT.abi" --bin "$OUT_DIR/$CONTRACT.sol/$CONTRACT.bin" --out "cosmos/precompile/staking/test/staking_test.abigen.go" --type $CONTRACT
+
+# oracle
+CONTRACT=Oracle
+echo "\n\n🦋 $CONTRACT...\n\n"
+mkdir -p cosmos/precompile/oracle && \
+${abigen} --pkg oracle --abi "$OUT_DIR/$CONTRACT.sol/$CONTRACT.abi" --bin "$OUT_DIR/$CONTRACT.sol/IOracleModule.bin" --out "cosmos/precompile/oracle/i_oracle_module.abigen.go" --type OracleModule
+
+CONTRACT=OracleTest
+echo "\n\n🦋 $CONTRACT...\n\n"
+mkdir -p cosmos/precompile/oracle/test && \
+${abigen} --pkg oracle --abi "$OUT_DIR/$CONTRACT.sol/$CONTRACT.abi" --bin "$OUT_DIR/$CONTRACT.sol/$CONTRACT.bin" --out "cosmos/precompile/oracle/test/oracle_test.abigen.go" --type $CONTRACT
 
 echo "🦋 Building and generating bindings for tests..."
 

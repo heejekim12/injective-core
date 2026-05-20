@@ -7,7 +7,6 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 )
 
@@ -66,6 +65,11 @@ type MarketOrderbook struct {
 	openNotionalCap         v2.OpenNotionalCap
 
 	oppositeSideDerivativeOrderbook OrderBookI
+
+	// olrDecrementedOrders tracks order indices for which DecrementLastLookOLR was already
+	// called during shouldSkipOrder. This prevents double-decrement when
+	// ProcessDerivativeMarketOrderbookMatchingResults processes unfilled quantities.
+	olrDecrementedOrders map[int]struct{}
 }
 
 //nolint:revive //ok
@@ -119,13 +123,15 @@ func NewDerivativeMarketOrderbook(
 		currentOpenNotional:     currentOpenNotional,
 		openNotionalCap:         openNotionalCap,
 		openInterestDelta:       math.LegacyZeroDec(),
+
+		olrDecrementedOrders: make(map[int]struct{}),
 	}
 	return &orderGroup
 }
 
-func (b *MarketOrderbook) GetNotional() math.LegacyDec { return b.notional }
+func (b *MarketOrderbook) GetNotional() math.LegacyDec { return b.notional.Clone() }
 
-func (b *MarketOrderbook) GetTotalQuantityFilled() math.LegacyDec { return b.totalQuantity }
+func (b *MarketOrderbook) GetTotalQuantityFilled() math.LegacyDec { return b.totalQuantity.Clone() }
 
 func (b *MarketOrderbook) GetOrderbookFillQuantities() []math.LegacyDec {
 	return b.fillQuantities
@@ -133,6 +139,12 @@ func (b *MarketOrderbook) GetOrderbookFillQuantities() []math.LegacyDec {
 
 func (b *MarketOrderbook) GetOrders() []*v2.DerivativeMarketOrder {
 	return b.orders
+}
+
+// GetOLRDecrementedOrders returns the set of order indices for which DecrementLastLookOLR
+// was already called during shouldSkipOrder.
+func (b *MarketOrderbook) GetOLRDecrementedOrders() map[int]struct{} {
+	return b.olrDecrementedOrders
 }
 
 func (b *MarketOrderbook) Peek(ctx sdk.Context) *v2.PriceLevel {
@@ -168,16 +180,41 @@ func (b *MarketOrderbook) shouldSkipOrder(ctx sdk.Context, order *v2.DerivativeM
 
 	b.initializedPositionState(ctx, order.SubaccountID())
 
+	// Check cross-margin emergency pause. During emergency pause, ALL cross-margin orders
+	// (including reduce-only) are blocked from matching to prevent any execution.
+	// Exception: liquidation orders are always allowed to ensure positions can be closed.
+	if !b.isLiquidation {
+		if err := b.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+			b.k.RiskEngine().DecrementLastLookOLR(ctx, order.SubaccountID(), order, b.market, b.markPrice, b.getCurrOrderFillableQuantity())
+			b.olrDecrementedOrders[b.orderIdx] = struct{}{}
+			return true
+		}
+	}
+
 	if b.shouldSkipForClosingPosition(ctx, order) {
+		// Vanilla orders cancelled by closing-position pre-checks still contribute to OLR.
+		b.k.RiskEngine().DecrementLastLookOLR(ctx, order.SubaccountID(), order, b.market, b.markPrice, b.getCurrOrderFillableQuantity())
+		b.olrDecrementedOrders[b.orderIdx] = struct{}{}
 		return true
 	}
-	if b.shouldSkipForMarginRequirement(order) {
+	// Risk-increasing admission checks are only enforced for non-reduce-only orders.
+	// Reduce-only/close-only is enforced separately (and deterministically) against the current position.
+	// ShouldSkipDerivativeOrderForMarginRequirement handles its own OLR decrement internally.
+	// Only mark OLR as decremented when the skip was deliberate (shouldSkip=true), not on error.
+	if !order.IsReduceOnly() {
+		if b.shouldSkipForMarginRequirement(ctx, order) {
+			b.olrDecrementedOrders[b.orderIdx] = struct{}{}
+			return true
+		}
+	}
+
+	if b.shouldSkipForOpenNotionalCapAndUpdateState(order) {
+		b.k.RiskEngine().DecrementLastLookOLR(ctx, order.SubaccountID(), order, b.market, b.markPrice, b.getCurrOrderFillableQuantity())
+		b.olrDecrementedOrders[b.orderIdx] = struct{}{}
 		return true
 	}
 
-	result := b.shouldSkipForOpenNotionalCapAndUpdateState(order)
-
-	return result
+	return false
 }
 
 func (b *MarketOrderbook) shouldSkipForClosingPosition(ctx sdk.Context, order *v2.DerivativeMarketOrder) bool {
@@ -205,7 +242,10 @@ func (b *MarketOrderbook) shouldSkipForClosingPosition(ctx sdk.Context, order *v
 	closeExecutionMargin := order.Margin.Mul(closingQuantity).Quo(order.OrderInfo.Quantity)
 
 	takerFeeRate := b.getTradeFeeRate(ctx, order)
-	err := position.CheckValidPositionToReduce(
+	err := b.k.RiskEngine().CheckValidPositionToReduce(
+		ctx,
+		subaccountID,
+		position,
 		b.market.GetMarketType(),
 		order.OrderInfo.Price,
 		order.IsBuy(),
@@ -213,7 +253,6 @@ func (b *MarketOrderbook) shouldSkipForClosingPosition(ctx sdk.Context, order *v
 		b.funding,
 		closeExecutionMargin,
 	)
-
 	return err != nil
 }
 
@@ -229,13 +268,13 @@ func (b *MarketOrderbook) getTradeFeeRate(ctx sdk.Context, order *v2.DerivativeM
 	return takerFeeRate
 }
 
-func (b *MarketOrderbook) shouldSkipForMarginRequirement(order *v2.DerivativeMarketOrder) bool {
-	if !order.IsVanilla() || b.market.GetMarketType() == types.MarketType_BinaryOption {
-		return false
-	}
+// shouldSkipForMarginRequirement checks whether the order should be skipped for margin requirements.
+// OLR is always decremented internally when the order is skipped (including error paths).
+func (b *MarketOrderbook) shouldSkipForMarginRequirement(ctx sdk.Context, order *v2.DerivativeMarketOrder) bool {
+	defer b.k.Meter(ctx).FuncTiming(&ctx, "MarketOrderbook.shouldSkipForMarginRequirement", metrics.Tag("market_id", b.marketID.Hex()))()
 
-	err := order.CheckInitialMarginRequirementMarkPriceThreshold(b.market.GetInitialMarginRatio(), b.markPrice)
-	return err != nil
+	shouldSkip, _ := b.k.RiskEngine().ShouldSkipDerivativeOrderForMarginRequirement(ctx, order.SubaccountID(), order, b.market, b.markPrice, b.getCurrOrderFillableQuantity())
+	return shouldSkip
 }
 
 func (b *MarketOrderbook) incrementCurrFillQuantities(incrQuantity math.LegacyDec) {
@@ -283,10 +322,10 @@ func (b *MarketOrderbook) getInitializedPositionState(
 	return b.positionCache[subaccountID]
 }
 
-func (b *MarketOrderbook) doesBreachOpenNotionalCapForMarketOrderbook(currOrder *v2.DerivativeMarketOrder) bool {
+func (b *MarketOrderbook) doesBreachOpenNotionalCapForMarketOrderbook(currOrder *v2.DerivativeMarketOrder, remainingQty math.LegacyDec) bool {
 	doesBreachCap, notionalDelta := DoesBreachOpenNotionalCap(
 		currOrder.OrderType,
-		b.getCurrOrderFillableQuantity(),
+		remainingQty,
 		b.markPrice,
 		b.getTotalOpenNotional(),
 		getSignedPositionQuantity(b.positionCache[currOrder.SubaccountID()]),
@@ -334,8 +373,8 @@ func (b *MarketOrderbook) updateNotionalCapValuesAfterFill(ctx sdk.Context, curr
 		getSignedPositionQuantity(b.positionCache[currOrder.SubaccountID()]),
 	)
 
-	b.openInterestDelta = b.openInterestDelta.Add(quantityDelta)
-	b.addedOpenNotional = b.addedOpenNotional.Add(notionalDelta)
+	b.openInterestDelta.AddMut(quantityDelta)
+	b.addedOpenNotional.AddMut(notionalDelta)
 
 	if pos := b.positionCache[currOrder.SubaccountID()]; pos != nil {
 		executionMargin := currOrder.Margin.Mul(fillQuantity).Quo(currOrder.OrderInfo.Quantity)
@@ -354,7 +393,7 @@ func (b *MarketOrderbook) updateNotionalCapValuesAfterFill(ctx sdk.Context, curr
 func (b *MarketOrderbook) shouldSkipForOpenNotionalCapAndUpdateState(
 	currOrder *v2.DerivativeMarketOrder,
 ) bool {
-	return b.doesBreachOpenNotionalCapForMarketOrderbook(currOrder)
+	return b.doesBreachOpenNotionalCapForMarketOrderbook(currOrder, b.getCurrOrderFillableQuantity())
 }
 
 func (b *MarketOrderbook) SetOppositeSideDerivativeOrderbook(opposite OrderBookI) {
@@ -362,11 +401,11 @@ func (b *MarketOrderbook) SetOppositeSideDerivativeOrderbook(opposite OrderBookI
 }
 
 func (b *MarketOrderbook) GetAddedOpenNotional() math.LegacyDec {
-	return b.addedOpenNotional.Add(b.cachedAddedOpenNotional)
+	return b.addedOpenNotional.Add(b.cachedAddedOpenNotional).Clone()
 }
 
 func (b *MarketOrderbook) GetOpenInterestDelta() math.LegacyDec {
-	return b.openInterestDelta
+	return b.openInterestDelta.Clone()
 }
 
 func (b *MarketOrderbook) getTotalOpenNotional() math.LegacyDec {
@@ -407,14 +446,16 @@ func (b *MarketOrderbook) initializedPositionState(
 	}
 }
 
+// Fill records a fill against the current market order. No cross-margin last-look OLR decrement is
+// needed — see the comment on LimitOrderbook.Fill for the rationale.
 func (b *MarketOrderbook) Fill(ctx sdk.Context, fillQuantity math.LegacyDec) {
 	defer b.k.Meter(ctx).FuncTiming(&ctx, "MarketOrderbook.Fill", metrics.Tag("market_id", b.marketID.Hex()))()
 
 	order := b.orders[b.orderIdx]
 
 	b.incrementCurrFillQuantities(fillQuantity)
-	b.notional = b.notional.Add(fillQuantity.Mul(order.OrderInfo.Price))
-	b.totalQuantity = b.totalQuantity.Add(fillQuantity)
+	b.notional.AddMut(fillQuantity.Mul(order.OrderInfo.Price))
+	b.totalQuantity.AddMut(fillQuantity)
 
 	b.updateNotionalCapValuesAfterFill(ctx, order, fillQuantity)
 }
@@ -548,9 +589,9 @@ func NewLimitOrderbook(
 	return &orderbook
 }
 
-func (b *LimitOrderbook) GetNotional() math.LegacyDec { return b.notional }
+func (b *LimitOrderbook) GetNotional() math.LegacyDec { return b.notional.Clone() }
 
-func (b *LimitOrderbook) GetTotalQuantityFilled() math.LegacyDec { return b.totalQuantity }
+func (b *LimitOrderbook) GetTotalQuantityFilled() math.LegacyDec { return b.totalQuantity.Clone() }
 
 func (b *LimitOrderbook) GetTransientOrderbookFills() *OrderbookFills {
 	if len(b.transientOrdersToCancel) == 0 {
@@ -573,11 +614,18 @@ func (b *LimitOrderbook) GetTransientOrderbookFills() *OrderbookFills {
 }
 
 func (b *LimitOrderbook) GetRestingOrderbookFills() *OrderbookFills {
-	if len(b.restingOrdersToCancel) == 0 {
+	if len(b.restingOrdersToCancel) == 0 && len(b.orderCancelHashes) == 0 {
 		return b.restingOrderbookFills
 	}
 
-	capacity := len(b.restingOrderbookFills.Orders) - len(b.restingOrdersToCancel)
+	if b.restingOrderbookFills == nil {
+		return nil
+	}
+
+	// Capacity hint: orderCancelHashes may contain both resting and transient hashes, so
+	// subtracting its full length from the resting count can underestimate or go negative.
+	// Use max(0, ...) since capacity is only an allocation hint — correctness is not affected.
+	capacity := max(0, len(b.restingOrderbookFills.Orders)-len(b.orderCancelHashes))
 
 	filteredFills := &OrderbookFills{
 		Orders:         make([]*v2.DerivativeLimitOrder, 0, capacity),
@@ -712,27 +760,49 @@ func (b *LimitOrderbook) addInvalidOrderToCancelsAndAdvanceToNextOrder(ctx sdk.C
 	}
 
 	b.currState = nil
-	b.advanceNewOrder(ctx)
+	// Do NOT call advanceNewOrder here — the caller loops iteratively.
 }
 
 //revive:disable:cyclomatic // this code has been like this for a long time. Needs refactoring and proper regression testing.
 func (b *LimitOrderbook) advanceNewOrder(ctx sdk.Context) {
 	defer b.k.Meter(ctx).FuncTiming(&ctx, "LimitOrderbook.advanceNewOrder", metrics.Tag("market_id", b.marketID.Hex()))()
 
-	currOrder := b.getCurrOrderAndInitializeCurrState()
+	// Iterative loop: skip/cancel paths set currState=nil and continue to the next order
+	// without recursion. This prevents stack overflow with many consecutive skipped orders
+	// (e.g. during emergency pause with a deep orderbook).
+	for {
+		currOrder := b.getCurrOrderAndInitializeCurrState()
 
-	if b.currState == nil {
-		return
-	}
+		if b.currState == nil {
+			return
+		}
 
-	subaccountID := currOrder.SubaccountID()
-	position := b.checkAndInitializePosition(ctx, subaccountID)
+		subaccountID := currOrder.SubaccountID()
+		position := b.checkAndInitializePosition(ctx, subaccountID)
 
-	// defensive programming check
-	if currOrder.IsReduceOnly() && !isValidReduceOnlyOrder(position, currOrder.IsBuy(), b.getCurrFillableQuantity()) {
-		b.addInvalidOrderToCancelsAndAdvanceToNextOrder(ctx, currOrder)
-		return
-	}
+		// Check cross-margin emergency pause. During emergency pause, ALL cross-margin orders
+		// (including reduce-only) are blocked from matching to prevent any execution.
+		// Exception: when matching against a liquidation order, resting limit orders must remain
+		// available to provide liquidity so that unhealthy positions can be closed.
+		//
+		// Resting orders are skipped without cancellation — emergency pause is temporary, and
+		// when lifted orders resume with queue priority preserved (matches spot pause semantics).
+		// Transient orders are cancelled and refunded to prevent them from being promoted to
+		// resting during post-match processing.
+		if !b.isLiquidation {
+			if err := b.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, subaccountID); err != nil {
+				b.k.RiskEngine().DecrementLastLookOLR(ctx, subaccountID, currOrder, b.market, b.markPrice, b.getCurrFillableQuantity())
+				b.addInvalidOrderToCancelsAndAdvanceToNextOrder(ctx, currOrder)
+				continue // iteratively advance to next order
+			}
+		}
+
+		// defensive programming check
+		if currOrder.IsReduceOnly() && !isValidReduceOnlyOrder(position, currOrder.IsBuy(), b.getCurrFillableQuantity()) {
+			// Reduce-only orders do not contribute to OLR — no last-look decrement needed.
+			b.addInvalidOrderToCancelsAndAdvanceToNextOrder(ctx, currOrder)
+			continue // iteratively advance to next order
+		}
 
 	isClosingPosition := position != nil && currOrder.IsBuy() != position.IsLong && position.Quantity.IsPositive()
 
@@ -742,34 +812,38 @@ func (b *LimitOrderbook) advanceNewOrder(ctx sdk.Context) {
 		closingQuantity := math.LegacyMinDec(remainingFillable, position.Quantity)
 		closeExecutionMargin := currOrder.Margin.Mul(closingQuantity).Quo(currOrder.OrderInfo.Quantity)
 
-		if err := position.CheckValidPositionToReduce(
-			b.market.GetMarketType(),
-			// NOTE: must be order price, not clearing price !!!
-			// due to security reasons related to margin adjustment case after increased trading fee
-			// see `adjustPositionMarginIfNecessary` for more details
-			currOrder.OrderInfo.Price,
-			b.isBuy,
-			tradeFeeRate,
-			b.funding,
-			closeExecutionMargin,
-		); err != nil {
+		// NOTE: must be order price, not clearing price !!!
+		// due to security reasons related to margin adjustment case after increased trading fee
+		// see `adjustPositionMarginIfNecessary` for more details
+		err := b.k.RiskEngine().CheckValidPositionToReduce(
+			ctx, subaccountID, position, b.market.GetMarketType(), currOrder.OrderInfo.Price,
+			b.isBuy, tradeFeeRate, b.funding, closeExecutionMargin,
+		)
+		if err != nil {
+			b.k.RiskEngine().DecrementLastLookOLR(ctx, subaccountID, currOrder, b.market, b.markPrice, b.getCurrFillableQuantity())
 			b.addInvalidOrderToCancelsAndAdvanceToNextOrder(ctx, currOrder)
-			return
+			continue // iteratively advance to next order
 		}
 	}
 
-	if currOrder.IsVanilla() && b.market.GetMarketType() != types.MarketType_BinaryOption {
-		err := currOrder.CheckInitialMarginRequirementMarkPriceThreshold(b.market.GetInitialMarginRatio(), b.markPrice)
-
-		if err != nil {
+	// Risk-increasing admission checks are only enforced for non-reduce-only orders.
+	// ShouldSkipDerivativeOrderForMarginRequirement always decrements OLR internally when skipping.
+	if !currOrder.IsReduceOnly() {
+		shouldSkip, _ := b.k.RiskEngine().ShouldSkipDerivativeOrderForMarginRequirement(ctx, subaccountID, currOrder, b.market, b.markPrice, b.getCurrFillableQuantity())
+		if shouldSkip {
 			b.addInvalidOrderToCancelsAndAdvanceToNextOrder(ctx, currOrder)
-			return
+			continue
 		}
 	}
 
 	if b.doesBreachOpenNotionalCapForLimitOrderbook(currOrder) {
+		b.k.RiskEngine().DecrementLastLookOLR(ctx, subaccountID, currOrder, b.market, b.markPrice, b.getCurrFillableQuantity())
 		b.addInvalidOrderToCancelsAndAdvanceToNextOrder(ctx, currOrder)
-		return
+		continue // iteratively advance to next order
+	}
+
+	// Order passed all checks — stop advancing.
+	break
 	}
 }
 
@@ -846,6 +920,10 @@ func (b *LimitOrderbook) getCurrIndex() int {
 	return idx
 }
 
+// Fill records a fill against the current order. No cross-margin last-look OLR decrement is needed here
+// because fills only occur after the order has passed the admission check in advanceNewOrder (via
+// ShouldSkipDerivativeOrderForMarginRequirement). If a pool is inadmissible, its orders are cancelled
+// (never filled), so the "first order fills then second is over-pruned" scenario cannot arise.
 func (b *LimitOrderbook) Fill(ctx sdk.Context, fillQuantity math.LegacyDec) {
 	defer b.k.Meter(ctx).FuncTiming(&ctx, "LimitOrderbook.Fill", metrics.Tag("market_id", b.marketID.Hex()))()
 
@@ -859,8 +937,8 @@ func (b *LimitOrderbook) Fill(ctx sdk.Context, fillQuantity math.LegacyDec) {
 
 	fillNotional := fillQuantity.Mul(order.OrderInfo.Price)
 
-	b.notional = b.notional.Add(fillNotional)
-	b.totalQuantity = b.totalQuantity.Add(fillQuantity)
+	b.notional.AddMut(fillNotional)
+	b.totalQuantity.AddMut(fillQuantity)
 
 	b.updateNotionalCapValuesAfterFill(order, fillQuantity)
 
@@ -964,11 +1042,11 @@ func (b *LimitOrderbook) SetOppositeSideDerivativeOrderbook(opposite OrderBookI)
 }
 
 func (b *LimitOrderbook) GetAddedOpenNotional() math.LegacyDec {
-	return b.addedOpenNotional.Add(b.cachedAddedOpenNotional)
+	return b.addedOpenNotional.Add(b.cachedAddedOpenNotional).Clone()
 }
 
 func (b *LimitOrderbook) GetOpenInterestDelta() math.LegacyDec {
-	return b.openInterestDelta
+	return b.openInterestDelta.Clone()
 }
 
 func (b *LimitOrderbook) GetPositionStates() map[common.Hash]*v2.PositionState {
@@ -987,8 +1065,8 @@ func (b *LimitOrderbook) updateNotionalCapValuesAfterFill(currOrder *v2.Derivati
 		getSignedPositionQuantity(b.positionCache[currOrder.SubaccountID()]),
 	)
 
-	b.openInterestDelta = b.openInterestDelta.Add(quantityDelta)
-	b.addedOpenNotional = b.addedOpenNotional.Add(notionalDelta)
+	b.openInterestDelta.AddMut(quantityDelta)
+	b.addedOpenNotional.AddMut(notionalDelta)
 
 	if pos := b.positionCache[currOrder.SubaccountID()]; pos != nil {
 		executionMargin := currOrder.Margin.Mul(fillQuantity).Quo(currOrder.OrderInfo.Quantity)

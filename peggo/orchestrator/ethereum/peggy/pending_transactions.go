@@ -90,7 +90,9 @@ func (s *peggyContract) SubscribeToPendingTxs(alchemyWebsocketURL string) {
 	for {
 		// Check that the transaction was send over the channel
 		pendingTransaction := <-ch
+		s.mtx.Lock()
 		s.pendingTxInputList.AddPendingTxInput(pendingTransaction)
+		s.mtx.Unlock()
 	}
 }
 

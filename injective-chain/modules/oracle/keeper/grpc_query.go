@@ -93,6 +93,28 @@ func (k *Keeper) PythPriceStates(c context.Context, _ *types.QueryPythPriceState
 	return res, nil
 }
 
+func (k *Keeper) PythProPriceStates(c context.Context, _ *types.QueryPythProPriceStatesRequest) (*types.QueryPythProPriceStatesResponse, error) {
+	ctx := sdk.UnwrapSDKContext(c)
+	defer k.Meter(ctx).FuncTiming(&ctx, "PythProPriceStates")()
+
+	res := &types.QueryPythProPriceStatesResponse{
+		PriceStates: k.GetAllPythProPriceStates(ctx),
+	}
+
+	return res, nil
+}
+
+func (k *Keeper) SedaFastPriceStates(c context.Context, _ *types.QuerySedaFastPriceStatesRequest) (*types.QuerySedaFastPriceStatesResponse, error) {
+	ctx := sdk.UnwrapSDKContext(c)
+	defer k.Meter(ctx).FuncTiming(&ctx, "SedaFastPriceStates")()
+
+	res := &types.QuerySedaFastPriceStatesResponse{
+		PriceStates: k.GetAllSedaFastPriceStates(ctx),
+	}
+
+	return res, nil
+}
+
 func (k *Keeper) StorkPriceStates(c context.Context, _ *types.QueryStorkPriceStatesRequest) (*types.QueryStorkPriceStatesResponse, error) {
 	ctx := sdk.UnwrapSDKContext(c)
 	defer k.Meter(ctx).FuncTiming(&ctx, "StorkPriceStates")()

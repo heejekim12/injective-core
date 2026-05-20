@@ -7,6 +7,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/events"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 )
@@ -149,6 +150,7 @@ func (k SpotKeeper) handleSpotMakerFeeDecrease(
 		subaccountID := order.SubaccountID()
 
 		k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, prevMarket.QuoteDenom, chainFormattedFeeRefund)
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 	}
 }
 
@@ -194,10 +196,13 @@ func (k SpotKeeper) handleSpotMakerFeeIncrease(
 			// continue to next order if charging the extra fee succeeds
 			// otherwise cancel the order
 			if err == nil {
+				k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 				continue
 			}
 		}
 
-		k.CancelSpotLimitOrder(ctx, prevMarket, marketID, subaccountID, isBuy, order)
+		if err := k.CancelSpotLimitOrder(ctx, prevMarket, marketID, subaccountID, isBuy, order); err != nil {
+			events.Emit(ctx, k.BaseKeeper, v2.NewEventOrderCancelFail(marketID, subaccountID, order.Hash().Hex(), order.Cid(), err))
+		}
 	}
 }

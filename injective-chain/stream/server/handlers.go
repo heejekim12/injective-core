@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 
 	"cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -300,6 +301,7 @@ func handleBatchDerivativeExecutionEvent(inBuffer *v2.StreamResponseMap, ev *exc
 		derivativeTrade := &v2.DerivativeTrade{
 			MarketId:            ev.MarketId,
 			IsBuy:               ev.IsBuy,
+			IsLiquidation:       ev.IsLiquidation,
 			ExecutionType:       ev.ExecutionType.String(),
 			Payout:              tradeLog.Payout,
 			PositionDelta:       tradeLog.PositionDelta,
@@ -457,6 +459,15 @@ func handleSetChainlinkDataStreamsPricesEvent(inBuffer *v2.StreamResponseMap, ev
 
 		addOraclePriceToResponse(inBuffer, price)
 	}
+}
+
+func handleEventOraclePriceUpdate(inBuffer *v2.StreamResponseMap, ev *oracletypes.EventOraclePriceUpdate) {
+	oraclePrice := &v2.OraclePrice{
+		Symbol: ev.Id,
+		Price:  ev.PriceState.Price,
+		Type:   strings.ToLower(ev.OracleType.String()),
+	}
+	addOraclePriceToResponse(inBuffer, oraclePrice)
 }
 
 func addOraclePriceToResponse(inBuffer *v2.StreamResponseMap, price *v2.OraclePrice) {

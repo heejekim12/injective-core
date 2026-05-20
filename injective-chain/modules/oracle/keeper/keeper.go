@@ -15,12 +15,6 @@ import (
 
 // Keeper defines a module interface that facilitates the getting and setting of oracle reference data
 type Keeper struct {
-	PriceFeederKeeper
-	CoinbaseKeeper
-	ProviderKeeper
-	PythKeeper
-	StorkKeeper
-	ChainlinkDataStreamsKeeper
 	types.QueryServer
 
 	storeKey storetypes.StoreKey
@@ -32,8 +26,7 @@ type Keeper struct {
 	evmKeeper     types.EVMKeeper
 
 	authority string
-
-	meter metrics.Meter
+	meter     metrics.Meter
 }
 
 // NewKeeper creates new instances of the oracle Keeper

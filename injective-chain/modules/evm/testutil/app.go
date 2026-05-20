@@ -9,10 +9,6 @@ import (
 	"time"
 
 	"cosmossdk.io/log"
-	"github.com/InjectiveLabs/injective-core/injective-chain/app"
-	"github.com/InjectiveLabs/injective-core/injective-chain/crypto/ethsecp256k1"
-	evmtypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/types"
-	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 	abci "github.com/cometbft/cometbft/abci/types"
 	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
 	cmtypes "github.com/cometbft/cometbft/types"
@@ -29,6 +25,12 @@ import (
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/ethereum/go-ethereum/crypto"
+
+	"github.com/InjectiveLabs/injective-core/injective-chain/app"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
+	"github.com/InjectiveLabs/injective-core/injective-chain/crypto/ethsecp256k1"
+	evmtypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 // DefaultConsensusParams defines the default Tendermint consensus params used in
@@ -60,11 +62,11 @@ func SetupWithOpts(
 	patch func(*app.InjectiveApp, app.GenesisState) app.GenesisState,
 	appOptions simtestutil.AppOptionsMap,
 ) *app.InjectiveApp {
-	return SetupWithDBAndOpts(isCheckTx, patch, dbm.NewMemDB(), appOptions)
+	return SetupWithDBAndOpts(isCheckTx, patch, dbm.NewMemDB())
 }
 
 func SetupWithDB(isCheckTx bool, patch func(*app.InjectiveApp, app.GenesisState) app.GenesisState, db dbm.DB) *app.InjectiveApp {
-	return SetupWithDBAndOpts(isCheckTx, patch, db, nil)
+	return SetupWithDBAndOpts(isCheckTx, patch, db)
 }
 
 // SetupWithDBAndOpts initializes a new InjectiveApp. A Nop logger is set in InjectiveApp.
@@ -72,26 +74,22 @@ func SetupWithDBAndOpts(
 	isCheckTx bool,
 	patch func(*app.InjectiveApp, app.GenesisState) app.GenesisState,
 	db dbm.DB,
-	appOptions simtestutil.AppOptionsMap,
 ) *app.InjectiveApp {
-	if appOptions == nil {
-		appOptions = make(simtestutil.AppOptionsMap, 0)
-	}
-	appOptions[server.FlagInvCheckPeriod] = 5
-	appOptions["evm.tracetx-enabled"] = true
-	// Enable EVM gRPC tracing endpoints (TraceTx/TraceBlock/TraceCall) in tests by default
-	appOptions["evm.enable-grpc-tracing"] = true
+	cfg := config.DefaultConfig()
 
 	// Make sure home dirs are unique so WASMd module is not locking same file during init
 	homePrefix := filepath.Join(os.TempDir(), fmt.Sprintf("injective-chain-evm-test-%d", rand.Intn(99999999)))
 	_ = os.MkdirAll(homePrefix, 0o700)
-	appOptions[flags.FlagHome] = homePrefix
+	cfg.Set(flags.FlagHome, homePrefix) //nolint
+
+	cfg.Set(server.FlagInvCheckPeriod, 5) //nolint
+	cfg.EVM.EnableGRPCTracing = true
 
 	injectiveApp := app.NewInjectiveApp(log.NewNopLogger(),
 		db,
 		nil,
 		true,
-		appOptions,
+		*cfg,
 		baseapp.SetChainID(TestnetChainID),
 	)
 

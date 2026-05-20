@@ -3,53 +3,39 @@ package keeper
 import (
 	"cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/assistant"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 )
 
 type ViewKeeper interface {
-	GetPrice(ctx sdk.Context, oracletype types.OracleType, base string, quote string) *math.LegacyDec
+	GetReferencePrice(ctx sdk.Context, oracletype types.OracleType, base string, quote string) *math.LegacyDec
+	GetPricePairState(ctx sdk.Context, oracletype types.OracleType, base, quote string, scalingOptions *types.ScalingOptions) *types.PricePairState
 	GetCumulativePrice(
 		ctx sdk.Context, oracleType types.OracleType, base string, quote string,
 	) (baseCumulative, quoteCumulative *math.LegacyDec)
-	GetProviderPrice(ctx sdk.Context, oracletype types.OracleType, provider string, symbol string) *math.LegacyDec
-	GetCumulativeProviderPrice(ctx sdk.Context, oracleType types.OracleType, provider string, symbol string) *math.LegacyDec
+	GetProviderPrice(ctx sdk.Context, provider string, symbol string) *math.LegacyDec
+	GetCumulativeProviderPrice(ctx sdk.Context, provider string, symbol string) *math.LegacyDec
 }
 
-// GetPrice returns the price for a given pair for a given oracle type.
-func (k *Keeper) GetPrice(ctx sdk.Context, oracletype types.OracleType, base, quote string) *math.LegacyDec {
-	defer k.Meter(ctx).FuncTiming(&ctx, "GetPrice")()
+// GetReferencePrice returns the reference price for a pair using oracle assistants when applicable,
+// with legacy resolution for oracle types not covered by assistant.NewOracleAssistant.
+func (k *Keeper) GetReferencePrice(ctx sdk.Context, oracleType types.OracleType, base, quote string) *math.LegacyDec {
+	defer k.Meter(ctx).FuncTiming(&ctx, "GetReferencePrice")()
 
-	switch oracletype {
-	case types.OracleType_Band:
-		return k.GetBandReferencePrice(ctx, base, quote)
-	case types.OracleType_PriceFeed:
-		return k.GetPriceFeedPrice(ctx, base, quote)
-	case types.OracleType_Coinbase:
-		return k.GetCoinbasePrice(ctx, base, quote)
-	case types.OracleType_Razor:
-		return nil
-	case types.OracleType_Dia:
-		return nil
-	case types.OracleType_API3:
-		return nil
-	case types.OracleType_Uma:
-		return nil
-	case types.OracleType_Pyth:
-		return k.GetPythPrice(ctx, base, quote)
-	case types.OracleType_BandIBC:
-		return k.GetBandIBCReferencePrice(ctx, base, quote)
-	case types.OracleType_Provider:
-		// GetProviderPrice should be called instead
-		return nil
-	case types.OracleType_Stork:
-		return k.GetStorkPrice(ctx, base, quote)
-	case types.OracleType_ChainlinkDataStreams:
-		return k.GetChainlinkDataStreamsPrice(ctx, base, quote)
+	a, err := assistant.NewOracleAssistant(k, oracleType)
+	if err == nil {
+		return a.ReferencePrice(ctx, base, quote)
 	}
 
-	return nil
+	switch oracleType {
+	case types.OracleType_Band:
+		return k.GetBandReferencePrice(ctx, base, quote)
+	case types.OracleType_BandIBC:
+		return k.GetBandIBCReferencePrice(ctx, base, quote)
+	default:
+		return nil
+	}
 }
 
 // GetPriceState returns the price for a given pair for a given oracle type.
@@ -64,25 +50,13 @@ func (k *Keeper) GetPricePairState(ctx sdk.Context, oracletype types.OracleType,
 		}
 	}
 
-	if oracletype == types.OracleType_PriceFeed {
-		priceFeedState := k.GetPriceFeedPriceState(ctx, base, quote)
-		if priceFeedState == nil {
-			return nil
-		}
-
-		pricePairPriceFeedState := &types.PricePairState{
-			PairPrice:            priceFeedState.Price,
-			BasePrice:            math.LegacyDec{},
-			QuotePrice:           math.LegacyDec{},
-			BaseCumulativePrice:  priceFeedState.CumulativePrice,
-			QuoteCumulativePrice: priceFeedState.CumulativePrice,
-			BaseTimestamp:        priceFeedState.Timestamp,
-			QuoteTimestamp:       priceFeedState.Timestamp,
-		}
-
-		return pricePairPriceFeedState
+	a, err := assistant.NewOracleAssistant(k, oracletype)
+	if err == nil {
+		return a.PricePairState(ctx, base, quote, scalingOptions)
 	}
 
+	// Legacy path: Band and BandIBC do not have assistants.
+	// All other unrecognised oracle types return nil from GetPriceState.
 	basePriceState := k.GetPriceState(ctx, base, oracletype)
 	if basePriceState == nil {
 		return nil
@@ -150,9 +124,6 @@ func (k *Keeper) getCumulativePriceForPriceFeed(ctx sdk.Context, base, quote str
 // getPriceStatesForOracle retrieves base and quote price states for a given oracle type.
 // Returns nil, nil if the base price state is not found.
 // For USD quotes, only the base price state is retrieved (quote price state will be nil).
-//
-//revive:disable:cyclomatic // Any refactoring to the function would make it less readable
-//revive:disable:cognitive-complexity // this function has slightly higher complexity but is still readable
 func (k *Keeper) getPriceStatesForOracle(
 	ctx sdk.Context,
 	oracleType types.OracleType,
@@ -160,8 +131,21 @@ func (k *Keeper) getPriceStatesForOracle(
 ) (basePriceState, quotePriceState *types.PriceState) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "getPriceStatesForOracle")()
 
-	var priceStateGetter func(symbol string) *types.PriceState
+	a, err := assistant.NewOracleAssistant(k, oracleType)
+	if err == nil {
+		basePriceState = a.PriceState(ctx, base)
+		if basePriceState == nil {
+			return nil, nil
+		}
+		if quote == types.QuoteUSD {
+			return basePriceState, nil
+		}
+		quotePriceState = a.PriceState(ctx, quote)
+		return basePriceState, quotePriceState
+	}
 
+	// Legacy path: Band and BandIBC do not have assistants.
+	var priceStateGetter func(symbol string) *types.PriceState
 	switch oracleType {
 	case types.OracleType_Band:
 		priceStateGetter = func(symbol string) *types.PriceState {
@@ -170,37 +154,9 @@ func (k *Keeper) getPriceStatesForOracle(
 			}
 			return nil
 		}
-	case types.OracleType_Coinbase:
-		priceStateGetter = func(symbol string) *types.PriceState {
-			if state := k.getLastCoinbasePriceState(ctx, symbol); state != nil {
-				return &state.PriceState
-			}
-			return nil
-		}
-	case types.OracleType_Pyth:
-		priceStateGetter = func(symbol string) *types.PriceState {
-			if state := k.GetPythPriceState(ctx, common.HexToHash(symbol)); state != nil {
-				return &state.PriceState
-			}
-			return nil
-		}
 	case types.OracleType_BandIBC:
 		priceStateGetter = func(symbol string) *types.PriceState {
 			if state := k.GetBandIBCPriceState(ctx, symbol); state != nil {
-				return &state.PriceState
-			}
-			return nil
-		}
-	case types.OracleType_Stork:
-		priceStateGetter = func(symbol string) *types.PriceState {
-			if state := k.GetStorkPriceState(ctx, symbol); state != nil {
-				return &state.PriceState
-			}
-			return nil
-		}
-	case types.OracleType_ChainlinkDataStreams:
-		priceStateGetter = func(symbol string) *types.PriceState {
-			if state := k.GetChainlinkDataStreamsPriceState(ctx, symbol); state != nil {
 				return &state.PriceState
 			}
 			return nil
@@ -219,10 +175,6 @@ func (k *Keeper) getPriceStatesForOracle(
 	}
 
 	quotePriceState = priceStateGetter(quote)
-	if quotePriceState == nil {
-		return nil, nil
-	}
-
 	return basePriceState, quotePriceState
 }
 

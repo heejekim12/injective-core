@@ -662,6 +662,23 @@ func (k *BaseKeeper) SetTransientSpotMarketOrder(
 	ordersStore.Set(key, bz)
 }
 
+// DeleteTransientSpotMarketOrder removes a transient spot market order from the transient store.
+func (k *BaseKeeper) DeleteTransientSpotMarketOrder(
+	ctx sdk.Context,
+	marketID common.Hash,
+	isBuy bool,
+	order *v2.SpotMarketOrder,
+) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "DeleteTransientSpotMarketOrder")()
+
+	store := k.getTransientStore(ctx)
+	ordersStore := prefix.NewStore(store, types.SpotMarketOrdersPrefix)
+	key := types.GetOrderByPriceKeyPrefix(marketID, isBuy, order.OrderInfo.Price, common.BytesToHash(order.OrderHash))
+	ordersStore.Delete(key)
+
+	k.DeleteCid(ctx, true, order.SubaccountID(), order.Cid())
+}
+
 // GetAllTransientSpotMarketOrders iterates over spot market exchange over a given direction.
 //
 //nolint:revive // ok

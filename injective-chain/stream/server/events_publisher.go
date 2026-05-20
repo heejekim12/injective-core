@@ -43,6 +43,7 @@ var supportedEventTypes = map[string]struct{}{
 	proto.MessageName(&oracletypes.SetPriceFeedPriceEvent{}):                       {},
 	proto.MessageName(&oracletypes.EventSetStorkPrices{}):                          {},
 	proto.MessageName(&oracletypes.EventSetChainlinkDataStreamsPrices{}):           {},
+	proto.MessageName(&oracletypes.EventOraclePriceUpdate{}):                       {},
 }
 
 type Publisher struct {
@@ -265,6 +266,8 @@ func handleParsedEvent(inBuffer *v2.StreamResponseMap, parsedEvent proto.Message
 		handleSetStorkPricesEvent(inBuffer, chainEvent)
 	case *oracletypes.EventSetChainlinkDataStreamsPrices:
 		handleSetChainlinkDataStreamsPricesEvent(inBuffer, chainEvent)
+	case *oracletypes.EventOraclePriceUpdate:
+		handleEventOraclePriceUpdate(inBuffer, chainEvent)
 	case *exchangev2types.EventOrderFail:
 		handleOrderFailEvent(inBuffer, chainEvent)
 	case *exchangev2types.EventTriggerConditionalMarketOrderFailed:

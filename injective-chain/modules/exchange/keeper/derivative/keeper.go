@@ -12,6 +12,7 @@ import (
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/feediscounts"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/rewards"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/subaccount"
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/risk"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 )
@@ -28,10 +29,12 @@ type DerivativeKeeper struct {
 	bank              bankkeeper.Keeper
 	wasm              types.WasmViewKeeper    // set after New
 	permissionsKeeper types.PermissionsKeeper // set after New
+	riskEngine        *risk.Engine
 }
 
 func New(
 	b *base.BaseKeeper,
+	re *risk.Engine,
 	sa *subaccount.SubaccountKeeper,
 	o types.OracleKeeper,
 	fd *feediscounts.FeeDiscountsKeeper,
@@ -49,6 +52,7 @@ func New(
 		insurance:         i,
 		trading:           tw,
 		permissionsKeeper: pk,
+		riskEngine:        re,
 	}
 }
 
@@ -64,6 +68,7 @@ func (k DerivativeKeeper) SetWasm(ws types.WasmViewKeeper) *DerivativeKeeper {
 		trading:           k.trading,
 		wasm:              ws,
 		permissionsKeeper: k.permissionsKeeper,
+		riskEngine:        k.riskEngine,
 	}
 }
 
@@ -75,6 +80,10 @@ func (k *DerivativeKeeper) SetPermissionsKeeper(pk types.PermissionsKeeper) {
 // This is used by the FBA package to process derivative matching results.
 func (k DerivativeKeeper) GetFeeDiscountConfigForMarket(ctx sdk.Context, marketID common.Hash, stakingInfo *v2.FeeDiscountStakingInfo) *v2.FeeDiscountConfig {
 	return k.feeDiscounts.GetFeeDiscountConfigForMarket(ctx, marketID, stakingInfo)
+}
+
+func (k DerivativeKeeper) RiskEngine() risk.ReadOnlyEngine {
+	return k.riskEngine
 }
 
 func (k DerivativeKeeper) TokenDenomDecimals(ctx sdk.Context, tokenDenom string) (decimals uint32, err error) {
@@ -96,6 +105,8 @@ func (k DerivativeKeeper) SavePosition(
 	position *v2.Position,
 ) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "SavePosition")()
+
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 
 	k.SetTransientPosition(ctx, marketID, subaccountID, position)
 

@@ -10,10 +10,8 @@ import (
 	"cosmossdk.io/log"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/marketfinder"
 	"github.com/cometbft/cometbft/libs/pubsub"
-	servertypes "github.com/cosmos/cosmos-sdk/server/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/google/uuid"
-	"github.com/spf13/cast"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
@@ -24,17 +22,6 @@ import (
 	txfeeskeeper "github.com/InjectiveLabs/injective-core/injective-chain/modules/txfees/keeper"
 	"github.com/InjectiveLabs/injective-core/injective-chain/stream/types"
 	v2 "github.com/InjectiveLabs/injective-core/injective-chain/stream/types/v2"
-)
-
-const (
-	FlagStreamServer                    = "chainstream-server"
-	FlagStreamServerBufferCapacity      = "chainstream-buffer-cap"
-	FlagStreamPublisherBufferCapacity   = "chainstream-publisher-buffer-cap"
-	FlagStreamEnforceKeepalive          = "chainstream-enforce-keepalive"
-	FlagStreamMinClientPingInterval     = "chainstream-min-client-ping-interval"
-	FlagStreamMaxConnectionIdle         = "chainstream-max-connection-idle"
-	FlagStreamServerPingInterval        = "chainstream-server-ping-interval"
-	FlagStreamServerPingResponseTimeout = "chainstream-server-ping-response-timeout"
 )
 
 type QueryContextProvider func(height int64, skip bool) (sdk.Context, error)
@@ -51,25 +38,19 @@ type StreamServer struct {
 
 func NewChainStreamServer(
 	bus *pubsub.Server,
-	appOpts servertypes.AppOptions,
+	cfg types.Config,
 	exchangeKeeper *exchangekeeper.Keeper,
 	txfeesKeeper *txfeeskeeper.Keeper,
 	contextProvider QueryContextProvider,
 ) *StreamServer {
-	shouldEnforceKeepalive := cast.ToBool(appOpts.Get(FlagStreamEnforceKeepalive))
-	keepaliveMinClientPingInterval := cast.ToInt64(appOpts.Get(FlagStreamMinClientPingInterval))
-	keepaliveMaxConnectionIdle := cast.ToInt64(appOpts.Get(FlagStreamMaxConnectionIdle))
-	keepaliveServerPingInterval := cast.ToInt64(appOpts.Get(FlagStreamServerPingInterval))
-	keepaliveServerPingResponseTimeout := cast.ToInt64(appOpts.Get(FlagStreamServerPingResponseTimeout))
-
 	var kaep = keepalive.EnforcementPolicy{}
 	var kasp = keepalive.ServerParameters{}
 
-	if shouldEnforceKeepalive {
-		kaep.MinTime = time.Duration(keepaliveMinClientPingInterval) * time.Second
-		kasp.MaxConnectionIdle = time.Duration(keepaliveMaxConnectionIdle) * time.Second
-		kasp.Time = time.Duration(keepaliveServerPingInterval) * time.Second
-		kasp.Timeout = time.Duration(keepaliveServerPingResponseTimeout) * time.Second
+	if cfg.EnforceKeepalive {
+		kaep.MinTime = time.Duration(cfg.MinClientPingInterval) * time.Second
+		kasp.MaxConnectionIdle = time.Duration(cfg.MaxConnectionIdle) * time.Second
+		kasp.Time = time.Duration(cfg.ServerPingInterval) * time.Second
+		kasp.Timeout = time.Duration(cfg.ServerPingResponseTimeout) * time.Second
 	}
 
 	server := &StreamServer{

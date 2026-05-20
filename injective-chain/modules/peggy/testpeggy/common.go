@@ -3,114 +3,24 @@ package testpeggy
 import (
 	"bytes"
 	"context"
-	"testing"
 	"time"
 
 	corestore "cosmossdk.io/core/store"
-	"cosmossdk.io/log"
 	"cosmossdk.io/math"
-	"cosmossdk.io/store"
-	storemetrics "cosmossdk.io/store/metrics"
-	storetypes "cosmossdk.io/store/types"
-	"cosmossdk.io/x/evidence"
-	"cosmossdk.io/x/upgrade"
-	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
-	dbm "github.com/cosmos/cosmos-db"
-	"github.com/cosmos/cosmos-sdk/baseapp"
-	"github.com/cosmos/cosmos-sdk/codec"
-	ccodec "github.com/cosmos/cosmos-sdk/crypto/codec"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	ccrypto "github.com/cosmos/cosmos-sdk/crypto/types"
-	"github.com/cosmos/cosmos-sdk/runtime"
-	"github.com/cosmos/cosmos-sdk/std"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/cosmos/cosmos-sdk/types/module"
-	"github.com/cosmos/cosmos-sdk/x/auth"
-	authcodec "github.com/cosmos/cosmos-sdk/x/auth/codec"
-	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
-	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-	"github.com/cosmos/cosmos-sdk/x/auth/vesting"
-	"github.com/cosmos/cosmos-sdk/x/bank"
-	bankkeeper "github.com/cosmos/cosmos-sdk/x/bank/keeper"
-	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	"github.com/cosmos/cosmos-sdk/x/crisis"
-	"github.com/cosmos/cosmos-sdk/x/distribution"
-	distrkeeper "github.com/cosmos/cosmos-sdk/x/distribution/keeper"
-	distrtypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
-	"github.com/cosmos/cosmos-sdk/x/genutil"
-	"github.com/cosmos/cosmos-sdk/x/gov"
-	govclient "github.com/cosmos/cosmos-sdk/x/gov/client"
-	govkeeper "github.com/cosmos/cosmos-sdk/x/gov/keeper"
-	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
-	govv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
-	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
-	"github.com/cosmos/cosmos-sdk/x/mint"
-	minttypes "github.com/cosmos/cosmos-sdk/x/mint/types"
-	"github.com/cosmos/cosmos-sdk/x/params"
-	paramsclient "github.com/cosmos/cosmos-sdk/x/params/client"
-	paramskeeper "github.com/cosmos/cosmos-sdk/x/params/keeper"
-	paramstypes "github.com/cosmos/cosmos-sdk/x/params/types"
-	paramsproposal "github.com/cosmos/cosmos-sdk/x/params/types/proposal"
-	"github.com/cosmos/cosmos-sdk/x/slashing"
-	slashingkeeper "github.com/cosmos/cosmos-sdk/x/slashing/keeper"
-	slashingtypes "github.com/cosmos/cosmos-sdk/x/slashing/types"
-	"github.com/cosmos/cosmos-sdk/x/staking"
-	stakingkeeper "github.com/cosmos/cosmos-sdk/x/staking/keeper"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
-	"github.com/cosmos/ibc-go/modules/capability"
-	capabilitytypes "github.com/cosmos/ibc-go/modules/capability/types"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/stretchr/testify/require"
 
-	injcodectypes "github.com/InjectiveLabs/injective-core/injective-chain/codec/types"
-	downtimedetector "github.com/InjectiveLabs/injective-core/injective-chain/modules/downtime-detector"
-	downtimedetectortypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/downtime-detector/types"
-	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange"
-	exchangekeeper "github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper"
-	exchangetypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
-	insurancekeeper "github.com/InjectiveLabs/injective-core/injective-chain/modules/insurance/keeper"
-	insurancetypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/insurance/types"
-	oraclekeeper "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/keeper"
-	oracletypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
-	peggyKeeper "github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/keeper"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
-	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 var (
-	// ModuleBasics is a mock module basic manager for testing
-	ModuleBasics = module.NewBasicManager(
-		auth.AppModuleBasic{},
-		genutil.AppModuleBasic{},
-		bank.AppModuleBasic{},
-		capability.AppModuleBasic{},
-		staking.AppModuleBasic{},
-		mint.AppModuleBasic{},
-		distribution.AppModuleBasic{},
-		gov.NewAppModuleBasic([]govclient.ProposalHandler{
-			paramsclient.ProposalHandler,
-			//upgradeclient.LegacyProposalHandler,
-			//upgradeclient.LegacyCancelProposalHandler,
-		}),
-		params.AppModuleBasic{},
-		crisis.AppModuleBasic{},
-		slashing.AppModuleBasic{},
-		upgrade.AppModuleBasic{},
-		evidence.AppModuleBasic{},
-		vesting.AppModuleBasic{},
-		exchange.AppModuleBasic{},
-	)
-
 	// Ensure that StakingKeeperMock implements required interface
 	_ types.StakingKeeper = &StakingKeeperMock{}
-)
 
-func init() {
-	chaintypes.InitSDKConfig()
-}
-
-var (
 	// ConsPrivKeys generate ed25519 ConsPrivKeys to be used for validator operator keys
 	ConsPrivKeys = []ccrypto.PrivKey{
 		ed25519.GenPrivKey(),
@@ -228,65 +138,53 @@ var (
 	}
 )
 
-// TestInput stores the various keepers required to test peggy
-type TestInput struct {
-	PeggyKeeper    peggyKeeper.Keeper
-	AccountKeeper  authkeeper.AccountKeeper
-	StakingKeeper  stakingkeeper.Keeper
-	SlashingKeeper slashingkeeper.Keeper
-	ExchangeKeeper exchangekeeper.Keeper
-	DistKeeper     distrkeeper.Keeper
-	BankKeeper     bankkeeper.BaseKeeper
-	GovKeeper      govkeeper.Keeper
-	Context        sdk.Context
-	Marshaler      codec.Codec
-	LegacyAmino    *codec.LegacyAmino
-}
+func GetDefaultValidatorSet() []ValidatorInfo {
+	return []ValidatorInfo{
+		{
+			AccAddr:  AccAddrs[0],
+			OrchAddr: AccAddrs[0],
+			ValAddr:  ValAddrs[0],
+			EthAddr:  EthAddrs[0],
+			ConsKey:  ConsPubKeys[0],
+			PubKey:   AccPubKeys[0],
+		},
 
-// SetupFiveValChain does all the initialization for a 5 Validator chain using the keys here
-func SetupFiveValChain(t *testing.T) (TestInput, sdk.Context) {
-	t.Helper()
-	input := CreateTestEnv(t)
+		{
+			AccAddr:  AccAddrs[1],
+			OrchAddr: AccAddrs[1],
+			ValAddr:  ValAddrs[1],
+			EthAddr:  EthAddrs[1],
+			ConsKey:  ConsPubKeys[1],
+			PubKey:   AccPubKeys[1],
+		},
 
-	// Set the params for our modules
-	input.StakingKeeper.SetParams(input.Context, TestingStakeParams)
+		{
+			AccAddr:  AccAddrs[2],
+			OrchAddr: AccAddrs[2],
+			ValAddr:  ValAddrs[2],
+			EthAddr:  EthAddrs[2],
+			ConsKey:  ConsPubKeys[2],
+			PubKey:   AccPubKeys[2],
+		},
 
-	// Initialize each of the validators
-	sh := stakingkeeper.NewMsgServerImpl(&input.StakingKeeper)
-	for i := range []int{0, 1, 2, 3, 4} {
-		// Initialize the account for the key
-		acc := input.AccountKeeper.NewAccount(
-			input.Context,
-			authtypes.NewBaseAccount(AccAddrs[i], AccPubKeys[i], uint64(i), 0),
-		)
+		{
+			AccAddr:  AccAddrs[3],
+			OrchAddr: AccAddrs[3],
+			ValAddr:  ValAddrs[3],
+			EthAddr:  EthAddrs[3],
+			ConsKey:  ConsPubKeys[3],
+			PubKey:   AccPubKeys[3],
+		},
 
-		// Set the balance for the account
-		input.BankKeeper.MintCoins(input.Context, minttypes.ModuleName, InitCoins)
-		input.BankKeeper.SendCoinsFromModuleToAccount(input.Context, minttypes.ModuleName, acc.GetAddress(), InitCoins)
-
-		// Set the account in state
-		input.AccountKeeper.SetAccount(input.Context, acc)
-
-		// Create a validator for that account using some of the tokens in the account
-		// and the staking handler
-		_, err := sh.CreateValidator(input.Context, NewTestMsgCreateValidator(ValAddrs[i], ConsPubKeys[i], StakingAmount))
-
-		// Return error if one exists
-		require.NoError(t, err)
+		{
+			AccAddr:  AccAddrs[4],
+			OrchAddr: AccAddrs[4],
+			ValAddr:  ValAddrs[4],
+			EthAddr:  EthAddrs[4],
+			ConsKey:  ConsPubKeys[4],
+			PubKey:   AccPubKeys[4],
+		},
 	}
-
-	// Run the staking endblocker to ensure valset is correct in state
-	_, err := input.StakingKeeper.EndBlocker(input.Context)
-
-	require.NoError(t, err)
-
-	// Register eth addresses for each validator
-	for i, addr := range ValAddrs {
-		input.PeggyKeeper.SetEthAddressForValidator(input.Context, addr, EthAddrs[i])
-	}
-
-	// Return the test input
-	return input, input.Context
 }
 
 type ValidatorInfo struct {
@@ -307,305 +205,8 @@ func GenerateNewValidatorInfo() ValidatorInfo {
 		ValAddr: sdk.ValAddress(privKey.PubKey().Address()),
 		ConsKey: ed25519.GenPrivKey().PubKey(),
 		PubKey:  privKey.PubKey(),
+		EthAddr: common.BytesToAddress(privKey.PubKey().Bytes()),
 	}
-}
-
-// CreateTestEnv creates the keeper testing environment for peggy
-func CreateTestEnv(t *testing.T) TestInput {
-	t.Helper()
-
-	logger := log.NewNopLogger()
-
-	authority := authtypes.NewModuleAddress(govtypes.ModuleName).String()
-
-	// Initialize store keys
-	peggyKey := storetypes.NewKVStoreKey(types.StoreKey)
-	keyAcc := storetypes.NewKVStoreKey(authtypes.StoreKey)
-	keyStaking := storetypes.NewKVStoreKey(stakingtypes.StoreKey)
-	keyBank := storetypes.NewKVStoreKey(banktypes.StoreKey)
-	tkeyBank := storetypes.NewTransientStoreKey(banktypes.TStoreKey)
-	okeyBank := storetypes.NewObjectStoreKey(banktypes.ObjectStoreKey)
-	keyDistro := storetypes.NewKVStoreKey(distrtypes.StoreKey)
-	keyParams := storetypes.NewKVStoreKey(paramstypes.StoreKey)
-	tkeyParams := storetypes.NewTransientStoreKey(paramstypes.TStoreKey)
-	keyGov := storetypes.NewKVStoreKey(govtypes.StoreKey)
-	keySlashing := storetypes.NewKVStoreKey(slashingtypes.StoreKey)
-	keyOracle := storetypes.NewKVStoreKey(oracletypes.StoreKey)
-	keyOracleMemStore := storetypes.NewKVStoreKey(oracletypes.MemStoreKey)
-	keyCapability := storetypes.NewKVStoreKey(capabilitytypes.StoreKey)
-	keyInsurance := storetypes.NewKVStoreKey(insurancetypes.StoreKey)
-	keyExchange := storetypes.NewKVStoreKey(exchangetypes.StoreKey)
-	tkeyExchange := storetypes.NewTransientStoreKey(exchangetypes.TStoreKey)
-	okeyExchange := storetypes.NewObjectStoreKey(exchangetypes.ObjectStoreKey)
-	keyDowntime := storetypes.NewKVStoreKey(downtimedetectortypes.StoreKey)
-
-	// Initialize memory database and mount stores on it
-	db := dbm.NewMemDB()
-	ms := store.NewCommitMultiStore(db, logger, storemetrics.NewNoOpMetrics())
-	ms.MountStoreWithDB(peggyKey, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyAcc, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyParams, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyStaking, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyBank, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(tkeyBank, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyDistro, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(tkeyParams, storetypes.StoreTypeTransient, nil)
-	ms.MountStoreWithDB(keyGov, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keySlashing, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyOracle, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyOracleMemStore, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyCapability, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyInsurance, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(keyExchange, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(tkeyExchange, storetypes.StoreTypeIAVL, nil)
-	ms.MountStoreWithDB(okeyExchange, storetypes.StoreTypeObject, nil)
-	err := ms.LoadLatestVersion()
-	require.Nil(t, err)
-
-	// Create sdk.Context
-	ctx := sdk.NewContext(ms, cmtproto.Header{
-		Height: 1234567,
-		Time:   time.Date(2020, time.April, 22, 12, 0, 0, 0, time.UTC),
-	}, false, logger)
-
-	cdc := MakeTestCodec()
-	marshaler := MakeTestMarshaler()
-
-	paramsKeeper := paramskeeper.NewKeeper(marshaler, cdc, keyParams, tkeyParams)
-	paramsKeeper.Subspace(authtypes.ModuleName)
-	paramsKeeper.Subspace(banktypes.ModuleName)
-	paramsKeeper.Subspace(stakingtypes.ModuleName)
-	paramsKeeper.Subspace(distrtypes.ModuleName)
-	paramsKeeper.Subspace(govtypes.ModuleName)
-	paramsKeeper.Subspace(types.DefaultParamspace)
-	paramsKeeper.Subspace(slashingtypes.ModuleName)
-	paramsKeeper.Subspace(oracletypes.ModuleName)
-	paramsKeeper.Subspace(insurancetypes.ModuleName)
-	paramsKeeper.Subspace(exchangetypes.ModuleName)
-
-	// this is also used to initialize module accounts for all the map keys
-	maccPerms := map[string][]string{
-		authtypes.FeeCollectorName:     nil,
-		distrtypes.ModuleName:          nil,
-		minttypes.ModuleName:           {authtypes.Minter},
-		stakingtypes.BondedPoolName:    {authtypes.Burner, authtypes.Staking},
-		stakingtypes.NotBondedPoolName: {authtypes.Burner, authtypes.Staking},
-		govtypes.ModuleName:            {authtypes.Burner},
-		types.ModuleName:               {authtypes.Minter, authtypes.Burner},
-		exchangetypes.ModuleName:       {authtypes.Minter, authtypes.Burner},
-	}
-
-	accountKeeper := authkeeper.NewAccountKeeper(
-		marshaler,
-		runtime.NewKVStoreService(keyAcc), // target store service
-		authtypes.ProtoBaseAccount,        // prototype
-		maccPerms,
-		authcodec.NewBech32Codec(chaintypes.InjectiveBech32Prefix),
-		chaintypes.InjectiveBech32Prefix,
-		authority,
-	)
-
-	blockedAddr := make(map[string]bool, len(maccPerms))
-	bankKeeper := bankkeeper.NewBaseKeeper(
-		marshaler,
-		runtime.NewKVStoreService(keyBank),
-		runtime.NewTransientKVStoreService(tkeyBank),
-		okeyBank,
-		accountKeeper,
-		blockedAddr,
-		authority,
-		logger,
-	)
-	bankKeeper.SetParams(ctx, banktypes.Params{DefaultSendEnabled: true})
-
-	stakingKeeper := stakingkeeper.NewKeeper(
-		marshaler,
-		runtime.NewKVStoreService(keyStaking),
-		accountKeeper,
-		bankKeeper,
-		authority,
-		authcodec.NewBech32Codec(sdk.GetConfig().GetBech32ValidatorAddrPrefix()),
-		authcodec.NewBech32Codec(sdk.GetConfig().GetBech32ConsensusAddrPrefix()),
-	)
-	stakingKeeper.SetParams(ctx, TestingStakeParams)
-
-	distKeeper := distrkeeper.NewKeeper(
-		marshaler,
-		runtime.NewKVStoreService(keyDistro),
-		accountKeeper,
-		bankKeeper,
-		stakingKeeper,
-		authtypes.FeeCollectorName,
-		authority,
-	)
-	err = distKeeper.Params.Set(ctx, distrtypes.DefaultParams())
-	require.NoError(t, err)
-
-	// set genesis items required for distribution
-	err = distKeeper.FeePool.Set(ctx, distrtypes.InitialFeePool())
-	require.NoError(t, err)
-
-	// total supply to track this
-	totalSupply := sdk.NewCoins(sdk.NewInt64Coin("stake", 100000000))
-
-	// set up initial accounts
-	for name, perms := range maccPerms {
-		mod := authtypes.NewEmptyModuleAccount(name, perms...)
-		if name == stakingtypes.NotBondedPoolName {
-			bankKeeper.MintCoins(ctx, minttypes.ModuleName, InitCoins)
-			err = bankKeeper.SendCoinsFromModuleToAccount(ctx, minttypes.ModuleName, mod.GetAddress(), totalSupply)
-			require.NoError(t, err)
-		} else if name == distrtypes.ModuleName {
-			// some big pot to pay out
-			bankKeeper.MintCoins(ctx, minttypes.ModuleName, sdk.NewCoins(sdk.NewInt64Coin("stake", 500000)))
-			err = bankKeeper.SendCoinsFromModuleToAccount(ctx, minttypes.ModuleName, mod.GetAddress(), sdk.NewCoins(sdk.NewInt64Coin("stake", 500000)))
-			require.NoError(t, err)
-		}
-		moduleAcc := (accountKeeper.NewAccount(ctx, mod)).(sdk.ModuleAccountI) // set the account number
-		accountKeeper.SetModuleAccount(ctx, moduleAcc)
-	}
-
-	stakeAddr := authtypes.NewModuleAddress(stakingtypes.BondedPoolName)
-	moduleAcct := accountKeeper.GetAccount(ctx, stakeAddr)
-	require.NotNil(t, moduleAcct)
-
-	// Load default wasm config
-
-	govRouter := govv1beta1.NewRouter().
-		AddRoute(paramsproposal.RouterKey, params.NewParamChangeProposalHandler(paramsKeeper)).
-		AddRoute(govtypes.RouterKey, govv1beta1.ProposalHandler)
-
-	govKeeper := govkeeper.NewKeeper(
-		marshaler,
-		runtime.NewKVStoreService(keyGov),
-		accountKeeper,
-		bankKeeper,
-		stakingKeeper,
-		distKeeper,
-		baseapp.NewMsgServiceRouter(),
-		govtypes.DefaultConfig(),
-		authority,
-	)
-
-	govKeeper.SetLegacyRouter(govRouter)
-
-	err = govKeeper.ProposalID.Set(ctx, govv1beta1.DefaultStartingProposalID)
-	require.NoError(t, err)
-	err = govKeeper.Params.Set(ctx, govv1.DefaultParams())
-	require.NoError(t, err)
-
-	slashingKeeper := slashingkeeper.NewKeeper(
-		marshaler,
-		cdc,
-		runtime.NewKVStoreService(keySlashing),
-		stakingKeeper,
-		authority,
-	)
-
-	// add capability keeper and ScopeToModule for ibc module
-	oracleKeeper := oraclekeeper.NewKeeper(
-		marshaler,
-		keyOracle,
-		keyOracleMemStore,
-		accountKeeper,
-		bankKeeper,
-		nil,
-		authority,
-	)
-
-	exchangeKeeper := new(exchangekeeper.Keeper)
-	insuranceKeeper := insurancekeeper.NewKeeper(
-		marshaler,
-		keyInsurance,
-		accountKeeper,
-		bankKeeper,
-		exchangeKeeper,
-		authority,
-	)
-
-	downtimeDetectorKeeper := downtimedetector.NewKeeper(keyDowntime)
-
-	exchangeKeeper = exchangekeeper.NewKeeper(
-		marshaler,
-		keyExchange,
-		tkeyExchange,
-		okeyExchange,
-		accountKeeper,
-		bankKeeper,
-		&oracleKeeper,
-		insuranceKeeper,
-		distKeeper,
-		stakingKeeper,
-		downtimeDetectorKeeper,
-		nil,
-		authority,
-	)
-
-	k := peggyKeeper.NewKeeper(
-		marshaler,
-		peggyKey,
-		stakingKeeper,
-		bankKeeper,
-		slashingKeeper,
-		distKeeper,
-		exchangeKeeper,
-		&oracleKeeper,
-		authority,
-		accountKeeper,
-	)
-
-	stakingKeeper.SetHooks(stakingtypes.NewMultiStakingHooks(
-		distKeeper.Hooks(),
-		slashingKeeper.Hooks(),
-		k.Hooks(),
-	))
-
-	k.SetParams(ctx, TestingPeggyParams)
-	k.SetLastOutgoingBatchID(ctx, uint64(0))
-	k.SetLastOutgoingPoolID(ctx, uint64(0))
-
-	return TestInput{
-		PeggyKeeper:    k,
-		AccountKeeper:  accountKeeper,
-		BankKeeper:     bankKeeper,
-		StakingKeeper:  *stakingKeeper,
-		SlashingKeeper: slashingKeeper,
-		ExchangeKeeper: *exchangeKeeper,
-		DistKeeper:     distKeeper,
-		GovKeeper:      *govKeeper,
-		Context:        ctx,
-		Marshaler:      marshaler,
-		LegacyAmino:    cdc,
-	}
-}
-
-// getSubspace returns a param subspace for a given module name.
-func getSubspace(k paramskeeper.Keeper, moduleName string) paramstypes.Subspace {
-	subspace, _ := k.GetSubspace(moduleName)
-	return subspace
-}
-
-// MakeTestCodec creates a legacy amino codec for testing
-func MakeTestCodec() *codec.LegacyAmino {
-	var cdc = codec.NewLegacyAmino()
-	auth.AppModuleBasic{}.RegisterLegacyAminoCodec(cdc)
-	bank.AppModuleBasic{}.RegisterLegacyAminoCodec(cdc)
-	staking.AppModuleBasic{}.RegisterLegacyAminoCodec(cdc)
-	distribution.AppModuleBasic{}.RegisterLegacyAminoCodec(cdc)
-	sdk.RegisterLegacyAminoCodec(cdc)
-	ccodec.RegisterCrypto(cdc)
-	params.AppModuleBasic{}.RegisterLegacyAminoCodec(cdc)
-	types.RegisterLegacyAminoCodec(cdc)
-	return cdc
-}
-
-// MakeTestMarshaler creates a proto codec for use in testing
-func MakeTestMarshaler() codec.Codec {
-	interfaceRegistry := injcodectypes.NewInterfaceRegistry()
-	std.RegisterInterfaces(interfaceRegistry)
-	ModuleBasics.RegisterInterfaces(interfaceRegistry)
-	types.RegisterInterfaces(interfaceRegistry)
-	return codec.NewProtoCodec(interfaceRegistry)
 }
 
 // nolint:all
@@ -857,10 +458,5 @@ func NewTestMsgCreateValidator(address sdk.ValAddress, pubKey ccrypto.PubKey, am
 
 func NewTestMsgUnDelegateValidator(address sdk.ValAddress, amt math.Int) *stakingtypes.MsgUndelegate {
 	msg := stakingtypes.NewMsgUndelegate(sdk.AccAddress(address).String(), address.String(), sdk.NewCoin("stake", amt))
-	return msg
-}
-
-func NewTestMsgDelegateValidator(address sdk.ValAddress, amt math.Int) *stakingtypes.MsgDelegate {
-	msg := stakingtypes.NewMsgDelegate(sdk.AccAddress(address).String(), address.String(), sdk.NewCoin("stake", amt))
 	return msg
 }

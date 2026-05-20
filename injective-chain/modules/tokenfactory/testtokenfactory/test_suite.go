@@ -54,7 +54,7 @@ var (
 
 // Setup sets up basic environment for suite (App, Ctx, and test accounts)
 func (s *KeeperTestHelper) Setup() {
-	s.App = app.Setup(false)
+	s.App = app.Setup(false, nil)
 	s.Ctx = s.App.NewContextLegacy(false, cmtypes.Header{Height: 1, ChainID: "sei-test", Time: time.Now().UTC()})
 	s.QueryHelper = &baseapp.QueryServiceTestHelper{
 		GRPCQueryRouter: s.App.GRPCQueryRouter(),
@@ -69,7 +69,7 @@ func (s *KeeperTestHelper) SetupTestForInitGenesis() {
 		app.Cleanup(s.App)
 	}
 	// Setting to True, leads to init genesis not running
-	s.App = app.Setup(true)
+	s.App = app.Setup(true, nil)
 	s.Ctx = s.App.BaseApp.NewContext(true)
 }
 

@@ -19,7 +19,5 @@ func NewBlockHandler(k keeper.Keeper) *BlockHandler {
 func (h *BlockHandler) BeginBlocker(ctx sdk.Context) {
 	defer h.k.Meter(ctx).FuncTiming(&ctx, "BeginBlocker")()
 
-	if ctx.BlockHeight()%100000 == 0 {
-		h.k.CleanupHistoricalPriceRecords(ctx)
-	}
+	h.k.CleanupHistoricalPriceRecords(ctx)
 }

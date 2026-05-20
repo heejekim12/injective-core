@@ -2,7 +2,9 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -58,6 +60,7 @@ func NewTxCmd() *cobra.Command {
 		NewRelayProviderPricesProposalTxCmd(),
 		NewGrantStorkPublisherPrivilegeProposalTxCmd(),
 		NewRevokeStorkPublisherPrivilegeProposalTxCmd(),
+		NewRelaySedaFastPricesTxCmd(),
 	)
 	return txCmd
 }
@@ -636,4 +639,76 @@ func revokeStorkPublisherPrivilegeProposalArgsToContent(cmd *cobra.Command, publ
 	}
 
 	return content, nil
+}
+
+// NewRelaySedaFastPricesTxCmd builds and broadcasts a MsgRelaySedaFastPrices.
+// The positional argument is a path to a JSON file that contains either a
+// single SEDA Fast result envelope object or a JSON array of such objects
+// (matching the "result" field of a feed.result / feed.execute WebSocket
+// message).
+func NewRelaySedaFastPricesTxCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "relay-seda-fast-prices [path-to-json]",
+		Short: "Relay SEDA Fast price update envelopes from a JSON file",
+		Long: strings.TrimSpace(`Read one or more SEDA Fast result JSON envelopes from a file and
+relay them on-chain as a MsgRelaySedaFastPrices.
+
+The file must contain either a single JSON object (one envelope) or a JSON
+array of objects (batch). Each object is the "result" field of a
+feed.result or feed.execute WebSocket message, i.e.
+  { "_tag": "ExecuteResponse", "data": { ... } }
+
+Example:
+  injectived tx oracle relay-seda-fast-prices ./seda_result.json --from=relayer
+`),
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientCtx, err := client.GetClientTxContext(cmd)
+			if err != nil {
+				return err
+			}
+
+			raw, err := os.ReadFile(args[0])
+			if err != nil {
+				return fmt.Errorf("reading seda fast json file: %w", err)
+			}
+
+			var updates [][]byte
+			raw = []byte(strings.TrimSpace(string(raw)))
+			if len(raw) > 0 && raw[0] == '[' {
+				// JSON array of envelopes
+				var arr []json.RawMessage
+				if err := json.Unmarshal(raw, &arr); err != nil {
+					return fmt.Errorf("parsing seda fast json array: %w", err)
+				}
+				for _, item := range arr {
+					updates = append(updates, item)
+				}
+			} else {
+				// Single envelope
+				updates = [][]byte{raw}
+			}
+
+			if len(updates) == 0 {
+				return fmt.Errorf("no SEDA Fast updates found in file %s", args[0])
+			}
+			if len(updates) > types.MaxSedaFastUpdatesPerMsg {
+				return fmt.Errorf("too many updates (%d), max %d per message", len(updates), types.MaxSedaFastUpdatesPerMsg)
+			}
+
+			sender := clientCtx.GetFromAddress()
+			msg := &types.MsgRelaySedaFastPrices{
+				Sender:  sender.String(),
+				Updates: updates,
+			}
+			if err := msg.ValidateBasic(); err != nil {
+				return err
+			}
+
+			return tx.GenerateOrBroadcastTxCLI(clientCtx, cmd.Flags(), msg)
+		},
+	}
+
+	cliflags.AddTxFlagsToCmd(cmd)
+	return cmd
 }

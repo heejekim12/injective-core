@@ -127,11 +127,13 @@ PKGS_TO_COVER := $(shell go list ./injective-chain/modules/exchange | paste -sd 
 test: ictest-all test-unit
 
 test-unit:
-	go install github.com/onsi/ginkgo/ginkgo@latest
-	ginkgo -r --race --randomizeSuites --randomizeAllSpecs --coverpkg=$(PKGS_TO_COVER) ./...
+	go test -race -shuffle=on -coverpkg=$(PKGS_TO_COVER) ./...
 
-test-fuzz: # use old clang linker on macOS https://github.com/golang/go/issues/65169
-	go test -fuzz FuzzTest ./injective-chain/modules/exchange/testexchange/fuzztesting -ldflags=-extldflags=-Wl,-ld_classic
+FUZZTIME ?= 0
+test-fuzz:
+	$(if $(filter 0,$(FUZZTIME)), \
+		go test -v -fuzz FuzzTest ./injective-chain/modules/exchange/testexchange/fuzztesting, \
+		go test -v -fuzz FuzzTest -fuzztime $(FUZZTIME) ./injective-chain/modules/exchange/testexchange/fuzztesting)
 
 test-exchange:
 	go test -race -v ./injective-chain/modules/exchange/...
@@ -204,10 +206,20 @@ ictest-fixed-gas-regression: rm-testcache
 	cd interchaintest && go test -timeout 30m -v -run Test_FixedGas_Regression .
 	./scripts/coverage-html.sh interchaintest/coverage/Test_FixedGas_Regression
 
+ictest-fixed-gas-cross-margin: rm-testcache
+	rm -rf interchaintest/coverage/Test_FixedGas_CrossMargin
+	cd interchaintest && go test -timeout 30m -v -run Test_FixedGas_CrossMargin .
+	./scripts/coverage-html.sh interchaintest/coverage/Test_FixedGas_CrossMargin
+
 ictest-peggo: rm-testcache
 	rm -rf interchaintest/coverage/Test_Peggo_Basic
 	cd interchaintest && go test -timeout 30m -v -run Test_Peggo_Basic .
 	./scripts/coverage-html.sh interchaintest/coverage/Test_Peggo_Basic
+
+ictest-peggo-rate-limit: rm-testcache
+	rm -rf interchaintest/coverage/Test_Peggo_RateLimits
+	cd interchaintest && go test -timeout 30m -v -run Test_Peggo_RateLimits .
+	./scripts/coverage-html.sh interchaintest/coverage/Test_Peggo_RateLimits
 
 ictest-peggo-ibc: rm-testcache
 	rm -rf interchaintest/coverage/Test_Peggo_IBCDenomDeployed
@@ -219,15 +231,15 @@ ictest-peggo-erc20: rm-testcache
 	cd interchaintest && go test -timeout 30m -v -run Test_Peggo_ERC20DenomDeployed .
 	./scripts/coverage-html.sh interchaintest/coverage/Test_Peggo_ERC20DenomDeployed
 
-ictest-peggo-rate-limit: rm-testcache
-	rm -rf interchaintest/coverage/Test_Peggo_RateLimit
-	cd interchaintest && go test -timeout 30m -v -run Test_Peggo_RateLimit .
-	./scripts/coverage-html.sh interchaintest/coverage/Test_Peggo_RateLimit
-
 ictest-evm: rm-testcache
 	rm -rf interchaintest/coverage/TestEVMRPC
 	cd interchaintest && go test -v -run "(EVMRPC*|EVMKeeper*)" .
 	./scripts/coverage-html.sh interchaintest/coverage/TestEVMRPC
+
+ictest-oracle-morpho: rm-testcache
+	rm -rf interchaintest/coverage/Test_OraclePrecompile_MorphoWrapper
+	cd interchaintest && go test -timeout 30m -v -run Test_OraclePrecompile_MorphoWrapper .
+	./scripts/coverage-html.sh interchaintest/coverage/Test_OraclePrecompile_MorphoWrapper
 
 ictest-chainstream: rm-testcache
 	rm -rf interchaintest/coverage/Test_ChainStream_ConnectsAndReceivesEvents
@@ -243,11 +255,6 @@ ictest-downtime-detector: rm-testcache
 	rm -rf interchaintest/coverage/TestDowntimeDetector
 	cd interchaintest && go test -timeout 30m -v -run TestDowntimeDetector .
 	./scripts/coverage-html.sh interchaintest/coverage/TestDowntimeDetector
-
-ictest-hyperlane: rm-testcache
-	rm -rf interchaintest/coverage/Test_HyperLaneRemoteTransfer_CosmosNativeXCosmosNative
-	cd interchaintest && go test -timeout 30m -v -run Test_HyperLaneRemoteTransfer_CosmosNativeXCosmosNative .
-	./scripts/coverage-html.sh interchaintest/coverage/Test_HyperLaneRemoteTransfer_CosmosNativeXCosmosNative
 
 ictest-validator-jailed: rm-testcache
 	rm -rf interchaintest/coverage/Test_ValidatorJailedEvent
@@ -294,10 +301,16 @@ ictest-peggy-valset-slashing-rejoin: rm-testcache
 	cd interchaintest && go test -timeout 30m -v -run Test_PeggyValsetSlashingAfterValidatorRejoin .
 	./scripts/coverage-html.sh interchaintest/coverage/Test_PeggyValsetSlashingAfterValidatorRejoin
 
+ictest-auction-chain-halt-protection: rm-testcache
+	rm -rf interchaintest/coverage/Test_AuctionChainHaltProtection
+	cd interchaintest && go test -timeout 30m -v -run Test_AuctionChainHaltProtection .
+	./scripts/coverage-html.sh interchaintest/coverage/Test_AuctionChainHaltProtection
+
 .PHONY: rm-testcache rm-ic-coverage
 .PHONY: ictest-all ictest-basic ictest-upgrade ictest-ibchooks ictest-permissions-wasm-hook ictest-pfm ictest-lanes
-.PHONY: ictest-fixed-gas ictest-fixed-gas-regression ictest-peggo ictest-peggo-ibc ictest-peggo-rate-limit ictest-hyperlane ictest-evm ictest-circle
-.PHONY: ictest-downtime-detector ictest-chainstream ictest-chainstream-websocket ictest-validator-jailed ictest-wasm-fees-to-auction ictest-chainlink-data-streams ictest-ante-multisig ictest-peggy-bad-signature-replay ictest-peggo-unbonded-valset-confirm-test ictest-peggy-valset-slashing-rejoin ictest-peggy-confirm-batch-unbonded
+.PHONY: ictest-fixed-gas ictest-fixed-gas-regression ictest-fixed-gas-cross-margin ictest-peggo ictest-peggo-ibc ictest-peggo-rate-limit ictest-evm ictest-circle
+.PHONY: ictest-downtime-detector ictest-chainstream ictest-chainstream-websocket ictest-validator-jailed ictest-wasm-fees-to-auction ictest-chainlink-data-streams
+.PHONY: ictest-ante-multisig ictest-peggy-bad-signature-replay ictest-peggo-unbonded-valset-confirm-test ictest-peggy-valset-slashing-rejoin ictest-peggy-confirm-batch-unbonded ictest-auction-chain-halt-protection ictest-oracle-morpho
 
 ###############################################################################
 

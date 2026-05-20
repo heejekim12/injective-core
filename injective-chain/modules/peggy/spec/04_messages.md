@@ -9,7 +9,7 @@ This is a reference document for Peggy message types. For code reference and exa
 
 ## User messages
 
-These are messages sent on the Injective Chain peggy module by the end user. See [workflow](./02_workflow.md) for a more detailed summary of the entire deposit and withdraw process.
+These are messages sent on the Injective Chain Peggy module by the end user. See [workflow](./02_workflow.md) for a more detailed summary of the entire deposit and withdraw process.
 
 ### SendToEth
 
@@ -41,6 +41,8 @@ type MsgCancelSendToEth struct {
 ### SubmitBadSignatureEvidence
 
 This call allows anyone to submit evidence that a validator has signed a valset or batch that never existed. Subject contains the batch or valset.
+
+When accepted, the current Peggy implementation jails the offending validator and records that checkpoint as already handled for that validator so the same evidence cannot be applied twice. The current code does not reduce stake in this flow.
 
 ```go
 type MsgSubmitBadSignatureEvidence struct {
@@ -149,7 +151,7 @@ These messages are sent by the `Signer` subprocess of `peggo`
 ### ConfirmBatch
 
 When `Signer` finds a batch that the `Orchestrator` (`Validator`) has not signed off, it constructs a signature with its `Delegated Ethereum Key` and sends the confirmation to Injective.
-It's crucial that a `Validator` eventually provides their confirmation for a created batch as they will be slashed otherwise. 
+It's crucial that a `Validator` eventually provides their confirmation for a created batch as Peggy can jail validators that miss the `SignedBatchesWindow`.
 
 ```go
 type MsgConfirmBatch struct {
@@ -164,7 +166,7 @@ type MsgConfirmBatch struct {
 ### ValsetConfirm
 
 When `Signer` finds a valset update that the `Orchestrator` (`Validator`) has not signed off, it constructs a signature with its `Delegated Ethereum Key` and sends the confirmation to Injective.
-It's crucial that a `Validator` eventually provides their confirmation for a created valset update as they will be slashed otherwise.
+It's crucial that a `Validator` eventually provides their confirmation for a created valset update as Peggy can jail validators that miss the `SignedValsetsWindow`.
 
 ```go
 type MsgValsetConfirm struct {
@@ -196,4 +198,3 @@ type MsgSetOrchestratorAddresses struct {
 }
 ```
 This message sets the Orchestrator's delegate keys. 
-

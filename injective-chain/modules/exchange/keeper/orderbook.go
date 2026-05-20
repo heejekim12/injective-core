@@ -133,13 +133,29 @@ func processDerivativeOrders(
 	restingDerivativeOrders []v2.DerivativeOrderBook,
 	safeUpdateBalanceHolds func(subaccountId, denom string, amount math.LegacyDec),
 ) {
+	// Cross-margin derivatives use pool-level order locking (OLR) and do not reserve
+	// per-order deposit holds, so BalanceWithBalanceHolds should only include
+	// derivative order holds for isolated-mode subaccounts.
+	isCrossBySubaccount := make(map[string]bool)
+
 	for _, orderbook := range restingDerivativeOrders {
 		market := k.GetDerivativeOrBinaryOptionsMarket(ctx, common.HexToHash(orderbook.MarketId), nil)
 
 		for _, order := range orderbook.Orders {
+			subaccountIDHex := order.SubaccountID().Hex()
+			isCross, ok := isCrossBySubaccount[subaccountIDHex]
+			if !ok {
+				profile, _ := k.GetEffectiveSubaccountRiskProfile(ctx, order.SubaccountID())
+				isCross = profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS
+				isCrossBySubaccount[subaccountIDHex] = isCross
+			}
+			if isCross {
+				continue
+			}
+
 			balanceHold := order.GetCancelDepositDelta(market.GetMakerFeeRate()).AvailableBalanceDelta
 			chainFormatBalanceHold := market.NotionalToChainFormat(balanceHold)
-			safeUpdateBalanceHolds(order.SubaccountID().Hex(), market.GetQuoteDenom(), chainFormatBalanceHold)
+			safeUpdateBalanceHolds(subaccountIDHex, market.GetQuoteDenom(), chainFormatBalanceHold)
 		}
 	}
 }

@@ -108,16 +108,22 @@ func (k *Keeper) OutgoingTxBatchExecuted(ctx sdk.Context, tokenContract common.A
 	}
 
 	// Iterate through remaining batches
-	k.IterateOutgoingTXBatches(ctx, func(key []byte, iter_batch *types.OutgoingTxBatch) bool {
+	batchesToCancel := make([]*types.OutgoingTxBatch, 0)
+	k.IterateOutgoingTXBatches(ctx, func(_ []byte, batch *types.OutgoingTxBatch) bool {
 		// If the iterated batches nonce is lower than the one that was just executed, cancel it
-		if iter_batch.BatchNonce < b.BatchNonce && common.HexToAddress(iter_batch.TokenContract) == tokenContract {
-			err := k.CancelOutgoingTXBatch(ctx, tokenContract, iter_batch.BatchNonce)
-			if err != nil {
-				panic(fmt.Sprintf("Failed cancel out batch %s %d while trying to execute %s %d with %s", tokenContract, iter_batch.BatchNonce, tokenContract, nonce, err))
-			}
+		if batch.BatchNonce < b.BatchNonce && common.HexToAddress(batch.TokenContract) == tokenContract {
+			batchesToCancel = append(batchesToCancel, batch)
 		}
+
 		return false
 	})
+
+	// cancel timed out batches
+	for _, batch := range batchesToCancel {
+		if err := k.CancelOutgoingTXBatch(ctx, tokenContract, batch.BatchNonce); err != nil {
+			panic(fmt.Sprintf("Failed cancel out batch %s %d while trying to execute %s %d with %s", tokenContract, batch.BatchNonce, tokenContract, nonce, err))
+		}
+	}
 
 	// Delete batch since it is finished
 	k.DeleteBatch(ctx, *b)
@@ -178,25 +184,27 @@ func (k *Keeper) DeleteBatch(ctx sdk.Context, batch types.OutgoingTxBatch) {
 func (k *Keeper) pickUnbatchedTX(ctx sdk.Context, contractAddress common.Address, maxElements int) ([]*types.OutgoingTransferTx, error) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "pickUnbatchedTX")()
 
-	selectedTx := make([]*types.OutgoingTransferTx, 0)
-	var err error
-
-	k.IterateOutgoingPoolByFee(ctx, contractAddress, func(txID uint64, tx *types.OutgoingTransferTx) bool {
-		if tx != nil && tx.Erc20Fee != nil {
-			selectedTx = append(selectedTx, tx)
-			err = k.removeFromUnbatchedTXIndex(ctx, contractAddress, tx.Erc20Fee, txID)
-			return err != nil || len(selectedTx) == maxElements
-		} else {
-			// we found a nil, exit
-			return true
+	unbatchedTxs := make([]*types.OutgoingTransferTx, 0)
+	k.IterateTokenTxsByFee(ctx, contractAddress, func(_ sdkmath.Int, txID uint64) bool {
+		tx, err := k.getPoolEntry(ctx, txID)
+		if err != nil {
+			panic("failed to get pool entry but fee is indexed: " + err.Error())
 		}
+
+		unbatchedTxs = append(unbatchedTxs, tx)
+		return len(unbatchedTxs) == maxElements
 	})
 
-	if len(selectedTx) == 0 {
+	if len(unbatchedTxs) == 0 {
 		return nil, types.ErrNoUnbatchedTxsFound
 	}
 
-	return selectedTx, nil
+	// clear these out from the fee index
+	for _, tx := range unbatchedTxs {
+		k.DeleteOutgoingTxFee(ctx, common.HexToAddress(tx.Erc20Fee.Contract), tx.Erc20Fee, tx.Id)
+	}
+
+	return unbatchedTxs, nil
 }
 
 // GetOutgoingTXBatch loads a batch object. Returns nil when not exists.
@@ -231,7 +239,7 @@ func (k *Keeper) CancelOutgoingTXBatch(ctx sdk.Context, tokenContract common.Add
 
 	for _, tx := range batch.Transactions {
 		tx.Erc20Fee.Contract = tokenContract.Hex()
-		k.prependToUnbatchedTXIndex(ctx, tokenContract, tx.Erc20Fee, tx.Id)
+		k.SetOutgoingTxFee(ctx, tokenContract, tx.Erc20Fee, tx.Id)
 	}
 
 	// Delete batch since it is finished
@@ -252,17 +260,13 @@ func (k *Keeper) CancelOutgoingTXBatch(ctx sdk.Context, tokenContract common.Add
 func (k *Keeper) IterateOutgoingTXBatches(ctx sdk.Context, cb func(key []byte, batch *types.OutgoingTxBatch) bool) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "IterateOutgoingTXBatches")()
 
-	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), types.OutgoingTXBatchKey)
-	iter := prefixStore.ReverseIterator(nil, nil)
-	defer iter.Close()
-	for ; iter.Valid(); iter.Next() {
+	outgoingBatchStore := prefix.NewStore(k.getStore(ctx), types.OutgoingTXBatchKey)
+	chaintypes.IterateSafe(outgoingBatchStore.ReverseIterator(nil, nil), func(key, value []byte) (stop bool) {
 		var batch types.OutgoingTxBatch
-		k.cdc.MustUnmarshal(iter.Value(), &batch)
-		// cb returns true to stop early
-		if cb(iter.Key(), &batch) {
-			break
-		}
-	}
+		k.cdc.MustUnmarshal(value, &batch)
+
+		return cb(key, &batch)
+	})
 }
 
 // GetOutgoingTxBatches returns the outgoing tx batches
@@ -295,20 +299,20 @@ func (k *Keeper) GetLastOutgoingBatchByTokenType(ctx sdk.Context, token common.A
 	return lastBatch
 }
 
-// SetLastSlashedBatchBlock sets the latest slashed Batch block height
-func (k *Keeper) SetLastSlashedBatchBlock(ctx sdk.Context, blockHeight uint64) {
-	defer k.Meter(ctx).FuncTiming(&ctx, "SetLastSlashedBatchBlock")()
+// SetLastJailedBatchBlock sets the latest jailed batch block height.
+func (k *Keeper) SetLastJailedBatchBlock(ctx sdk.Context, blockHeight uint64) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "SetLastJailedBatchBlock")()
 
 	store := ctx.KVStore(k.storeKey)
-	store.Set(types.LastSlashedBatchBlock, types.UInt64Bytes(blockHeight))
+	store.Set(types.LastJailedBatchBlock, types.UInt64Bytes(blockHeight))
 }
 
-// GetLastSlashedBatchBlock returns the latest slashed Batch block
-func (k *Keeper) GetLastSlashedBatchBlock(ctx sdk.Context) uint64 {
-	defer k.Meter(ctx).FuncTiming(&ctx, "GetLastSlashedBatchBlock")()
+// GetLastJailedBatchBlock returns the latest jailed batch block.
+func (k *Keeper) GetLastJailedBatchBlock(ctx sdk.Context) uint64 {
+	defer k.Meter(ctx).FuncTiming(&ctx, "GetLastJailedBatchBlock")()
 
 	store := ctx.KVStore(k.storeKey)
-	storedBytes := store.Get(types.LastSlashedBatchBlock)
+	storedBytes := store.Get(types.LastJailedBatchBlock)
 
 	if len(storedBytes) == 0 {
 		return 0
@@ -317,13 +321,13 @@ func (k *Keeper) GetLastSlashedBatchBlock(ctx sdk.Context) uint64 {
 	return types.UInt64FromBytes(storedBytes)
 }
 
-// GetUnslashedBatches returns all the unslashed batches in state
-func (k *Keeper) GetUnslashedBatches(ctx sdk.Context, maxHeight uint64) (out []*types.OutgoingTxBatch) {
-	defer k.Meter(ctx).FuncTiming(&ctx, "GetUnslashedBatches")()
+// GetUnjailedBatches returns all the unjailed batches in state
+func (k *Keeper) GetUnjailedBatches(ctx sdk.Context, maxHeight uint64) (out []*types.OutgoingTxBatch) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "GetUnjailedBatches")()
 
-	lastSlashedBatchBlock := k.GetLastSlashedBatchBlock(ctx)
-	k.IterateBatchBySlashedBatchBlock(ctx, lastSlashedBatchBlock, maxHeight, func(_ []byte, batch *types.OutgoingTxBatch) bool {
-		if batch.Block > lastSlashedBatchBlock {
+	lastJailedBatchBlock := k.GetLastJailedBatchBlock(ctx)
+	k.IterateBatchByJailedBatchBlock(ctx, lastJailedBatchBlock, maxHeight, func(_ []byte, batch *types.OutgoingTxBatch) bool {
+		if batch.Block > lastJailedBatchBlock {
 			out = append(out, batch)
 		}
 		return false
@@ -332,20 +336,18 @@ func (k *Keeper) GetUnslashedBatches(ctx sdk.Context, maxHeight uint64) (out []*
 	return
 }
 
-// IterateBatchBySlashedBatchBlock iterates through all Batch by last slashed Batch block in ASC order
-func (k *Keeper) IterateBatchBySlashedBatchBlock(ctx sdk.Context, lastSlashedBatchBlock, maxHeight uint64, cb func([]byte, *types.OutgoingTxBatch) bool) {
-	defer k.Meter(ctx).FuncTiming(&ctx, "IterateBatchBySlashedBatchBlock")()
+// IterateBatchByJailedBatchBlock iterates through all Batch by last jailed Batch block in ASC order
+func (k *Keeper) IterateBatchByJailedBatchBlock(ctx sdk.Context, lastJailedBatchBlock, maxHeight uint64, cb func([]byte, *types.OutgoingTxBatch) bool) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "IterateBatchByJailedBatchBlock")()
 
-	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), types.OutgoingTXBatchBlockKey)
-	iter := prefixStore.Iterator(types.UInt64Bytes(lastSlashedBatchBlock), types.UInt64Bytes(maxHeight))
-	defer iter.Close()
-
-	for ; iter.Valid(); iter.Next() {
-		var Batch types.OutgoingTxBatch
-		k.cdc.MustUnmarshal(iter.Value(), &Batch)
-		// cb returns true to stop early
-		if cb(iter.Key(), &Batch) {
-			break
-		}
-	}
+	start, end := types.UInt64Bytes(lastJailedBatchBlock), types.UInt64Bytes(maxHeight)
+	outgoingBatchByBlockStore := prefix.NewStore(k.getStore(ctx), types.OutgoingTXBatchBlockKey)
+	chaintypes.IterateSafe(outgoingBatchByBlockStore.Iterator(start, end),
+		func(key, value []byte) (stop bool) {
+			var batch types.OutgoingTxBatch
+			k.cdc.MustUnmarshal(value, &batch)
+			// cb returns true to stop early
+			return cb(key, &batch)
+		},
+	)
 }

@@ -3,8 +3,8 @@ package keeper
 import (
 	"cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/assistant"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 )
 
@@ -36,48 +36,19 @@ func (k *Keeper) GetPriceState(ctx sdk.Context, key string, oracletype types.Ora
 			return nil
 		}
 		return &priceState.PriceState
-	case types.OracleType_Coinbase:
-		priceState := k.GetCoinbasePriceState(ctx, key)
-		if priceState == nil {
-			return nil
-		}
-		return &priceState.PriceState
-	case types.OracleType_Razor:
-		return nil
-	case types.OracleType_Dia:
-		return nil
-	case types.OracleType_API3:
-		return nil
-	case types.OracleType_Uma:
-		return nil
-	case types.OracleType_Pyth:
-		priceState := k.GetPythPriceState(ctx, common.HexToHash(key))
-		if priceState == nil {
-			return nil
-		}
-		return &priceState.PriceState
 	case types.OracleType_BandIBC:
 		priceState := k.GetBandIBCPriceState(ctx, key)
 		if priceState == nil {
 			return nil
 		}
 		return &priceState.PriceState
-	case types.OracleType_Provider:
-		// GetProviderPrice should be called instead
+	case types.OracleType_Razor, types.OracleType_Dia, types.OracleType_API3, types.OracleType_Uma:
 		return nil
-	case types.OracleType_Stork:
-		priceState := k.GetStorkPriceState(ctx, key)
-		if priceState == nil {
+	default:
+		a, err := assistant.NewOracleAssistant(k, oracletype)
+		if err != nil {
 			return nil
 		}
-		return &priceState.PriceState
-	case types.OracleType_ChainlinkDataStreams:
-		priceState := k.GetChainlinkDataStreamsPriceState(ctx, key)
-		if priceState == nil {
-			return nil
-		}
-		return &priceState.PriceState
+		return a.PriceState(ctx, key)
 	}
-
-	return nil
 }

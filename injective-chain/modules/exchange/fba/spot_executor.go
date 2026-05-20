@@ -55,10 +55,12 @@ func (e *SpotBatchAuctionExecutor) buildOrderbooks(ctx sdk.Context) {
 	marketID := e.market.MarketID()
 	buyIterator := e.keeper.SpotLimitOrderbookIterator(ctx, marketID, true)
 	buyTransientOrders := e.keeper.GetAllTransientSpotLimitOrdersByMarketDirection(ctx, marketID, true)
+	buyTransientOrders = filterPausedSpotLimitOrders(ctx, e.keeper, buyTransientOrders)
 	e.buyOrderbook = spot.NewSpotLimitOrderbook(e.keeper, buyIterator, buyTransientOrders, true)
 
 	sellIterator := e.keeper.SpotLimitOrderbookIterator(ctx, marketID, false)
 	sellTransientOrders := e.keeper.GetAllTransientSpotLimitOrdersByMarketDirection(ctx, marketID, false)
+	sellTransientOrders = filterPausedSpotLimitOrders(ctx, e.keeper, sellTransientOrders)
 	e.sellOrderbook = spot.NewSpotLimitOrderbook(e.keeper, sellIterator, sellTransientOrders, false)
 }
 
@@ -313,4 +315,35 @@ func (e *SpotBatchAuctionExecutor) processTransientOrderbookFills(
 
 	tradingRewardPoints = types.MergeTradingRewardPoints(buyTradingRewards, sellTradingRewards)
 	return events, newRestingBuySpotLimitOrders, newRestingSellSpotLimitOrders, tradingRewardPoints
+}
+
+// filterPausedSpotLimitOrders excludes transient spot limit orders belonging to cross-margin
+// subaccounts under emergency pause. No store writes — safe for parallel FBA execution.
+// Filtered orders remain in the transient store and are promoted to resting at end-of-block;
+// subsequent blocks skip them via the resting-order pause filter in getRestingOrder.
+func filterPausedSpotLimitOrders(ctx sdk.Context, k spot.SpotKeeper, orders []*v2.SpotLimitOrder) []*v2.SpotLimitOrder {
+	n := 0
+	for _, order := range orders {
+		if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+			continue
+		}
+		orders[n] = order
+		n++
+	}
+	return orders[:n]
+}
+
+// filterPausedSpotMarketOrders excludes transient spot market orders belonging to cross-margin
+// subaccounts under emergency pause. No store writes — safe for parallel FBA execution.
+// Actual cancellation/refund happens in the pre-FBA cleanup step (CancelPausedTransientSpotOrders).
+func filterPausedSpotMarketOrders(ctx sdk.Context, k spot.SpotKeeper, orders []*v2.SpotMarketOrder) []*v2.SpotMarketOrder {
+	n := 0
+	for _, order := range orders {
+		if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+			continue
+		}
+		orders[n] = order
+		n++
+	}
+	return orders[:n]
 }

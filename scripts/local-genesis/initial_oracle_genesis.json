@@ -288,7 +288,10 @@
       }
     ],
     "params": {
-      "pyth_contract": "inj1z60tg0tekdzcasenhuuwq3htjcd5slmgf7gpez"
+      "pyth_contract": "inj1z60tg0tekdzcasenhuuwq3htjcd5slmgf7gpez",
+      "chainlink_data_streams_verification_gas_limit": "500000",
+      "pyth_pro_verification_gas_limit": "500000",
+      "pyth_pro_verification_fee": "1"
     },
     "price_feed_price_states": [
       {

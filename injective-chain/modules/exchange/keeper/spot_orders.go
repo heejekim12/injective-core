@@ -86,8 +86,6 @@ func (k *Keeper) createSpotMarketOrderWithResultsForAtomicExecution(
 		return nil, nil, err
 	}
 
-	marginDenom := order.GetMarginDenom(validatedMarket)
-
 	bestPrice := k.GetBestSpotLimitOrderPrice(ctx, marketID, !order.IsBuy())
 
 	if err := k.validateMarketOrderBestPriceAgainstOrder(order, bestPrice); err != nil {
@@ -100,9 +98,8 @@ func (k *Keeper) createSpotMarketOrderWithResultsForAtomicExecution(
 		feeRate = feeRate.Mul(k.GetMarketAtomicExecutionFeeMultiplier(ctx, marketID, types.MarketType_Spot))
 	}
 
-	balanceHold, chainFormattedBalanceHold := k.computeMarketOrderBalanceHold(validatedMarket, order, feeRate, *bestPrice)
-
-	if err := k.ChargeAccount(ctx, subaccountID, marginDenom, chainFormattedBalanceHold); err != nil {
+	balanceHold, err := k.RiskEngine().ReserveSpotMarketOrder(ctx, k.SubaccountKeeper, subaccountID, order, validatedMarket, feeRate, *bestPrice)
+	if err != nil {
 		return nil, &orderHash, err
 	}
 
@@ -129,22 +126,6 @@ func (*Keeper) validateMarketOrderBestPriceAgainstOrder(
 		return types.ErrSlippageExceedsWorstPrice
 	}
 	return nil
-}
-
-// computeMarketOrderBalanceHold returns both logical and chain-formatted balance holds
-// for a spot market order, accounting for buy/sell denomination differences.
-func (*Keeper) computeMarketOrderBalanceHold(
-	market *v2.SpotMarket,
-	order *v2.SpotOrder,
-	feeRate, bestPrice math.LegacyDec,
-) (balanceHold, chainFormattedBalanceHold math.LegacyDec) {
-	balanceHold = order.GetMarketOrderBalanceHold(feeRate, bestPrice)
-	if order.IsBuy() {
-		chainFormattedBalanceHold = market.NotionalToChainFormat(balanceHold)
-	} else {
-		chainFormattedBalanceHold = market.QuantityToChainFormat(balanceHold)
-	}
-	return balanceHold, chainFormattedBalanceHold
 }
 
 // executeOrQueueMarketOrder runs atomic execution immediately or stores the order transiently for batch execution.

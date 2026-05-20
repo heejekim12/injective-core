@@ -103,10 +103,12 @@ func (l *oracle) observeEthEvents(c context.Context) (err error) { //nolint:revi
 		latestHeight = latestBlockAllowedForQuery
 	}
 
-	events, err := l.getEthEvents(ctx, l.lastRecordedEthEventHeight, latestHeight)
+	events, endBlock, err := l.getEthEvents(ctx, l.lastRecordedEthEventHeight, latestHeight)
 	if err != nil {
 		return err
 	}
+
+	latestHeight = endBlock
 
 	lastClaim, err := l.getLastClaimEvent(ctx)
 	if err != nil {
@@ -175,7 +177,11 @@ func (l *oracle) resetQueryRange() {
 	}
 }
 
-func (l *oracle) getEthEvents(ctx context.Context, startBlock, endBlock uint64) (events []event, err error) {
+func (l *oracle) getEthEvents(
+	ctx context.Context,
+	startBlock,
+	endBlock uint64,
+) (events []event, scannedEndBlock uint64, err error) {
 	ctx, done := l.meter.FuncTimingCtx(ctx, "getEthEvents")
 	defer done(&err)
 
@@ -237,10 +243,10 @@ func (l *oracle) getEthEvents(ctx context.Context, startBlock, endBlock uint64) 
 	}
 
 	if err := l.retry(ctx, scanEthEventsFn); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return events, nil
+	return events, endBlock, nil
 }
 
 func (l *oracle) getLatestEthHeight(ctx context.Context) (latestHeight uint64, err error) {

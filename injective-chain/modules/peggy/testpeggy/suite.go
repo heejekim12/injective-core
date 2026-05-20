@@ -7,7 +7,6 @@ import (
 	abci "github.com/cometbft/cometbft/abci/types"
 	cmtypes "github.com/cometbft/cometbft/api/cometbft/types/v1"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	simtestutil "github.com/cosmos/cosmos-sdk/testutil/sims"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	minttypes "github.com/cosmos/cosmos-sdk/x/mint/types"
@@ -15,11 +14,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	simapp "github.com/InjectiveLabs/injective-core/injective-chain/app"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/keeper"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
 )
 
-// todo(dusan): eventually cleanup tests and have them run in parallel
 type TestSuite struct {
 	Ctx sdk.Context
 	App *simapp.InjectiveApp
@@ -28,9 +27,9 @@ type TestSuite struct {
 func NewTestSuite(t *testing.T) *TestSuite {
 	t.Helper()
 
-	app := simapp.Setup(false, simtestutil.AppOptionsMap{
-		flags.FlagHome: t.TempDir(), // enables parallel execution of tests (wasm VM)
-	})
+	cfg := config.DefaultConfig()
+	cfg.Set(flags.FlagHome, t.TempDir())
+	app := simapp.Setup(false, cfg)
 
 	ctx := app.BaseApp.NewContextLegacy(
 		false,

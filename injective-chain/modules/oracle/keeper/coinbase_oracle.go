@@ -1,39 +1,16 @@
 package keeper
 
 import (
+	"bytes"
+	"encoding/binary"
+
 	"cosmossdk.io/errors"
-	"cosmossdk.io/math"
 	"cosmossdk.io/store/prefix"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
-
-type CoinbaseKeeper interface {
-	GetCoinbasePrice(ctx sdk.Context, base string, quote string) *math.LegacyDec
-	HasCoinbasePriceState(ctx sdk.Context, key string) bool
-	GetCoinbasePriceState(ctx sdk.Context, key string) *types.CoinbasePriceState
-	SetCoinbasePriceState(ctx sdk.Context, priceData *types.CoinbasePriceState) error
-	GetAllCoinbasePriceStates(ctx sdk.Context) []*types.CoinbasePriceState
-}
-
-// GetCoinbasePrice gets the 5 minute TWAP price for a given base quote pair.
-func (k *Keeper) GetCoinbasePrice(ctx sdk.Context, base, quote string) *math.LegacyDec {
-	defer k.Meter(ctx).FuncTiming(&ctx, "GetCoinbasePrice")()
-
-	basePrice := k.getCoinbasePriceTWAP(ctx, base)
-	if quote == types.QuoteUSD {
-		return basePrice
-	}
-	quotePrice := k.getCoinbasePriceTWAP(ctx, quote)
-
-	if basePrice == nil || basePrice.IsNil() || quotePrice == nil || quotePrice.IsNil() {
-		return nil
-	}
-
-	price := basePrice.Quo(*quotePrice)
-	return &price
-}
 
 func (k *Keeper) GetCoinbasePriceState(ctx sdk.Context, key string) *types.CoinbasePriceState {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetCoinbasePriceState")()
@@ -47,11 +24,17 @@ func (k *Keeper) HasCoinbasePriceState(ctx sdk.Context, key string) bool {
 
 	store := ctx.KVStore(k.storeKey)
 	iterationKey := types.GetCoinbasePriceStoreIterationKey(key)
-	iterator := prefix.NewStore(store, iterationKey).Iterator(nil, nil)
-	defer iterator.Close()
-	return iterator.Valid()
+	prefixStore := prefix.NewStore(store, iterationKey)
+	var found bool
+	chaintypes.IterateSafe(prefixStore.Iterator(nil, nil), func(iterKey, _ []byte) bool {
+		if len(iterKey) != 8 {
+			return false
+		}
+		found = true
+		return true
+	})
+	return found
 }
-
 // GetCoinbasePriceStates fetches the coinbase price states for a given coinbase price key.
 func (k *Keeper) GetCoinbasePriceStates(ctx sdk.Context, key string) []*types.CoinbasePriceState {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetCoinbasePriceStates")()
@@ -59,18 +42,18 @@ func (k *Keeper) GetCoinbasePriceStates(ctx sdk.Context, key string) []*types.Co
 	priceDatas := make([]*types.CoinbasePriceState, 0)
 	store := ctx.KVStore(k.storeKey)
 
-	coinbasePriceDataStore := prefix.NewStore(store, append(types.CoinbasePriceKey, []byte(key)...))
+	coinbasePriceDataStore := prefix.NewStore(store, types.GetCoinbasePriceStoreIterationKey(key))
 
-	// iterate from more recent (larger) timestamps to older (smaller) timestamps
-	iterator := coinbasePriceDataStore.ReverseIterator(nil, nil)
-	defer iterator.Close()
-
-	for ; iterator.Valid(); iterator.Next() {
-		var priceData types.CoinbasePriceState
-		bz := iterator.Value()
-		k.cdc.MustUnmarshal(bz, &priceData)
-		priceDatas = append(priceDatas, &priceData)
-	}
+	chaintypes.IterateSafe(coinbasePriceDataStore.ReverseIterator(nil, nil), func(iterKey, bz []byte) bool {
+		if len(iterKey) != 8 {
+			return false
+		}
+		pd := new(types.CoinbasePriceState)
+		k.cdc.MustUnmarshal(bz, pd)
+		pd.Kind, pd.Key, pd.Timestamp = "prices", key, binary.BigEndian.Uint64(iterKey)
+		priceDatas = append(priceDatas, pd)
+		return false
+	})
 
 	return priceDatas
 }
@@ -92,7 +75,9 @@ func (k *Keeper) SetCoinbasePriceState(ctx sdk.Context, priceData *types.Coinbas
 
 	price := priceData.GetDecPrice()
 
-	bz := k.cdc.MustMarshal(priceData)
+	toStore := *priceData
+	toStore.Kind, toStore.Key, toStore.Timestamp = "", "", 0
+	bz := k.cdc.MustMarshal(&toStore)
 	k.getStore(ctx).Set(priceFeedInfoKey, bz)
 
 	k.AppendPriceRecord(ctx, types.OracleType_Coinbase, priceData.Key, &types.PriceRecord{
@@ -101,7 +86,7 @@ func (k *Keeper) SetCoinbasePriceState(ctx sdk.Context, priceData *types.Coinbas
 	})
 
 	// remove old coinbase price states outside of TWAP window when set price data
-	k.pruneOldCoinbasePriceStates(ctx, priceData.Key)
+	k.PruneOldCoinbasePriceStates(ctx, priceData.Key)
 
 	// nolint:errcheck //ignored on purpose
 	ctx.EventManager().EmitTypedEvent(&types.SetCoinbasePriceEvent{
@@ -121,43 +106,49 @@ func (k *Keeper) GetAllCoinbasePriceStates(ctx sdk.Context) []*types.CoinbasePri
 
 	coinbasePriceDataStore := prefix.NewStore(store, types.CoinbasePriceKey)
 
-	iterator := coinbasePriceDataStore.Iterator(nil, nil)
-	defer iterator.Close()
-
-	for ; iterator.Valid(); iterator.Next() {
-		var priceData types.CoinbasePriceState
-		bz := iterator.Value()
-		k.cdc.MustUnmarshal(bz, &priceData)
-		priceDatas = append(priceDatas, &priceData)
-	}
+	chaintypes.IterateSafe(coinbasePriceDataStore.Iterator(nil, nil), func(iterKey, bz []byte) bool {
+		sym, ts, ok := types.ParseCoinbasePriceStoreIterKey(iterKey)
+		if !ok {
+			return false
+		}
+		pd := new(types.CoinbasePriceState)
+		k.cdc.MustUnmarshal(bz, pd)
+		pd.Kind, pd.Key, pd.Timestamp = "prices", sym, ts
+		priceDatas = append(priceDatas, pd)
+		return false
+	})
 
 	return priceDatas
 }
 
-func (k *Keeper) pruneOldCoinbasePriceStates(ctx sdk.Context, key string) {
-	defer k.Meter(ctx).FuncTiming(&ctx, "pruneOldCoinbasePriceStates")()
+func (k *Keeper) PruneOldCoinbasePriceStates(ctx sdk.Context, key string) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "PruneOldCoinbasePriceStates")()
 
 	now := ctx.BlockTime().Unix()
-	twapWindowEnd := now - types.TwapWindow
-	lastSeenTimestamp := now
+	windowStart := sdk.Uint64ToBigEndian(uint64(now - types.TwapWindow))
 
 	store := ctx.KVStore(k.storeKey)
-	coinbasePriceDataStore := prefix.NewStore(store, append(types.CoinbasePriceKey, []byte(key)...))
+	coinbasePriceDataStore := prefix.NewStore(store, types.GetCoinbasePriceStoreIterationKey(key))
 
-	// iterate from more recent (larger) timestamps to older (smaller) timestamps
-	iterator := coinbasePriceDataStore.ReverseIterator(nil, nil)
-	defer iterator.Close()
+	// Find the most recent price sample strictly before the TWAP window start.
+	// We keep this entry so the TWAP calculation can correctly weight the
+	// interval from windowStart to the first in-window sample.
+	var anchorKey []byte
+	chaintypes.IterateKeysSafe(coinbasePriceDataStore.ReverseIterator(nil, windowStart), func(iterKey []byte) bool {
+		anchorKey = bytes.Clone(iterKey)
+		return true
+	})
+	if anchorKey == nil {
+		return
+	}
 
-	for ; iterator.Valid(); iterator.Next() {
-		var priceState types.CoinbasePriceState
-		bz := iterator.Value()
-		k.cdc.MustUnmarshal(bz, &priceState)
-
-		priceStateTimestamp := int64(priceState.Timestamp)
-		if twapWindowEnd > lastSeenTimestamp {
-			coinbasePriceDataStore.Delete(iterator.Key())
-		}
-		lastSeenTimestamp = priceStateTimestamp
+	var keysToDelete [][]byte
+	chaintypes.IterateKeysSafe(coinbasePriceDataStore.Iterator(nil, anchorKey), func(iterKey []byte) bool {
+		keysToDelete = append(keysToDelete, bytes.Clone(iterKey))
+		return false
+	})
+	for _, dk := range keysToDelete {
+		coinbasePriceDataStore.Delete(dk)
 	}
 }
 
@@ -165,63 +156,19 @@ func (k *Keeper) pruneOldCoinbasePriceStates(ctx sdk.Context, key string) {
 func (k *Keeper) getLastCoinbasePriceState(ctx sdk.Context, key string) *types.CoinbasePriceState {
 	defer k.Meter(ctx).FuncTiming(&ctx, "getLastCoinbasePriceState")()
 
-	var priceFeedInfo types.CoinbasePriceState
 	iterationKey := types.GetCoinbasePriceStoreIterationKey(key)
 	prefixStore := prefix.NewStore(k.getStore(ctx), iterationKey)
 
-	iterator := prefixStore.ReverseIterator(nil, nil)
-	defer iterator.Close()
-
-	if !iterator.Valid() {
-		return nil
-	}
-
-	k.cdc.MustUnmarshal(iterator.Value(), &priceFeedInfo)
-	return &priceFeedInfo
-}
-
-// getCoinbasePriceTWAP retrieves the 5 minute TWAP price for given coinbase price key.
-// EXAMPLE:
-// now   t0   t1   t2   t3   t4   t5    ... t8
-// 1345  1320 1260 1200 1140 1080 1020  ...
-//
-//	p0        p2   p3   p4         ... p8
-//	18        19   19.5 20         ... 17
-//	                 |-- p0_cum--| + |--p2_cum--| + |--p3_cum--| + |--p4_cum--| + |------p8_cum---------|
-//
-// priceCumulative_5min = (now - t0)*p0 + (t0 - t2)*p2 + (t2 - t3)*p3 + (t3 - t4)*p4 + (300 - (now - t4)) * p8
-// priceCumulative_5min = (1345-1320)*18 + (1320-1200)*19 + (1200-1140)*19.5 + (1140-1080)*20 + (300-(1345-1080))*17 = 5695
-// TWAP = priceCumulative_5min / 300 = 5695/300 = 18.98
-func (k *Keeper) getCoinbasePriceTWAP(ctx sdk.Context, asset string) *math.LegacyDec {
-	defer k.Meter(ctx).FuncTiming(&ctx, "getCoinbasePriceTWAP")()
-
-	assetPriceStates := k.GetCoinbasePriceStates(ctx, asset)
-	if len(assetPriceStates) == 0 {
-		return nil
-	}
-
-	now := ctx.BlockTime().Unix()
-	twapWindowEnd := now - types.TwapWindow
-	lastSeenTimestamp := now
-
-	priceCumulative := math.LegacyZeroDec()
-
-	for _, priceState := range assetPriceStates {
-		priceStateTimestamp := int64(priceState.Timestamp)
-		if twapWindowEnd > lastSeenTimestamp {
-			break
+	var priceFeedInfo *types.CoinbasePriceState
+	chaintypes.IterateSafe(prefixStore.ReverseIterator(nil, nil), func(iterKey, iterVal []byte) bool {
+		if len(iterKey) != 8 {
+			return false
 		}
-		var timeDelta int64
-		if priceStateTimestamp < twapWindowEnd {
-			timeDelta = types.TwapWindow - (now - lastSeenTimestamp)
-		} else {
-			timeDelta = lastSeenTimestamp - priceStateTimestamp
-		}
-		priceCumulativeIncrement := math.LegacyNewDec(timeDelta).Mul(priceState.PriceState.Price)
-		priceCumulative = priceCumulative.Add(priceCumulativeIncrement)
-		lastSeenTimestamp = priceStateTimestamp
-	}
-
-	twapPrice := priceCumulative.QuoTruncate(math.LegacyNewDec(types.TwapWindow))
-	return &twapPrice
+		pd := new(types.CoinbasePriceState)
+		k.cdc.MustUnmarshal(iterVal, pd)
+		pd.Kind, pd.Key, pd.Timestamp = "prices", key, binary.BigEndian.Uint64(iterKey)
+		priceFeedInfo = pd
+		return true
+	})
+	return priceFeedInfo
 }

@@ -14,7 +14,7 @@ This decentralized bridge is secured and operated by the validators of the Injec
 2. [Workflow](./02_workflow.md)    
 3. [State](./03_state.md) 
 4. [Messages](./04_messages.md)
-5. [Slashing](./05_slashing.md)
+5. [Jailing](05_jailing.md)
 6. [End-Block](./06_end_block.md)
 7. [Events](./07_events.md)
 8. [Parameters](./08_params.md)

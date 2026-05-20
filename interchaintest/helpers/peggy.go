@@ -384,8 +384,8 @@ func GetPeggoEnvDefaults(
 		"PEGGO_STATSD_DISABLED=true",
 		"PEGGO_HEALTH_CHECK_PORT=7070",
 		// shorten test time
-		"PEGGO_LOOP_DURATION=10s",
-		"PEGGO_RELAYER_LOOP_DURATION=15s",
+		"PEGGO_LOOP_DURATION=5s",
+		"PEGGO_RELAYER_LOOP_DURATION=10s",
 		"PEGGO_RELAY_VALSET_OFFSET_DUR=0m",
 		"PEGGO_RELAY_BATCH_OFFSET_DUR=0m",
 	}
@@ -410,7 +410,7 @@ func AwaitLastObservedValsetNonce(
 	}
 
 	timeout := time.After(dur)
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 
 	for {
 		select {
@@ -461,6 +461,7 @@ type PeggyRateLimitTransfersJSON struct {
 	Outflows []json.RawMessage `json:"outflows"`
 }
 
+// todo(dusan): this goes away after sdk-go includes updated peggy proto
 func GetPeggyRateLimitTransfersJSON(
 	t *testing.T,
 	ctx context.Context,
@@ -693,7 +694,7 @@ func AwaitLastObservedEventNonce(
 	}
 
 	timeout := time.After(dur)
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 
 	for {
 		select {
@@ -738,7 +739,7 @@ func AwaitLastOutgoingBatchID(
 	}
 
 	timeout := time.After(dur)
-	ticker := time.NewTicker(10 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 
 	for {
 		select {

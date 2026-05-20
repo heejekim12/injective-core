@@ -50,6 +50,13 @@ func (k BinaryOptionsKeeper) BinaryOptionsMarketLaunch(
 		return nil, errors.Wrapf(types.ErrBinaryOptionsMarketExists, "ticker %s quoteDenom %s", ticker, quoteDenom)
 	}
 
+	if err := oracletypes.ValidateProviderDerivativeOracleLayout(oracleSymbol, oracleProvider); err != nil {
+		return nil, errors.Wrap(types.ErrInvalidOracle, err.Error())
+	}
+	if err := oracletypes.ValidateReservedProviderID(oracleProvider); err != nil {
+		return nil, errors.Wrap(types.ErrInvalidOracle, err.Error())
+	}
+
 	// Enforce that the provider exists, but not necessarily that the oracle price for the symbol exists
 	if k.oracle.GetProviderInfo(ctx, oracleProvider) == nil {
 		return nil, errors.Wrapf(types.ErrInvalidOracle, "oracle provider %s does not exist", oracleProvider)

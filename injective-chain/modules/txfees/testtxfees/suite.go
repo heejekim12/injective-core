@@ -6,10 +6,10 @@ import (
 
 	cmtproto "github.com/cometbft/cometbft/api/cometbft/types/v1"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	simtestutil "github.com/cosmos/cosmos-sdk/testutil/sims"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	simapp "github.com/InjectiveLabs/injective-core/injective-chain/app"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 )
 
 type TestSuite struct {
@@ -20,10 +20,9 @@ type TestSuite struct {
 func NewTestSuite(t *testing.T) TestSuite {
 	t.Helper()
 
-	app := simapp.Setup(false, simtestutil.AppOptionsMap{
-		flags.FlagHome: t.TempDir(), // enables parallel execution of tests (wasm VM)
-	})
-
+	cfg := config.DefaultConfig()
+	cfg.Set(flags.FlagHome, t.TempDir())
+	app := simapp.Setup(false, cfg)
 	ctx := app.NewContextLegacy(false, cmtproto.Header{
 		Height: 1,
 		Time:   time.Now().UTC(),

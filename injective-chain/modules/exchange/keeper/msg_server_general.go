@@ -30,8 +30,88 @@ func (k GeneralMsgServer) UpdateParams(c context.Context, msg *v2.MsgUpdateParam
 		return nil, govtypes.ErrInvalidSigner.Wrap("sender must be governance authority")
 	}
 
+	// Backfill fields added after the initial Params schema so that older sdk-go clients
+	// (or governance scripts using a pre-cross-margin Params layout) don't zero out live values.
+	// Each group uses a nil LegacyDec sentinel to detect whether the caller populated the field.
+	currentParams := k.GetParams(ctx)
+
+	// White-knight fields: backfill whichever field the caller omitted so that updating
+	// one field doesn't silently clear the other.
+	//   - Rate nil → backfill rate from current params (list-only or old-client update).
+	//   - List empty → backfill list from current params (rate-only update or old client).
+	// Note: proto3 cannot distinguish an empty slice from an omitted one, so the list
+	// cannot be cleared via MsgUpdateParams alone. To remove all white-knight liquidators,
+	// use a dedicated governance mechanism or set each address individually.
+	if msg.Params.WhiteKnightLiquidatorRewardShareRate.IsNil() {
+		msg.Params.WhiteKnightLiquidatorRewardShareRate = currentParams.WhiteKnightLiquidatorRewardShareRate
+	}
+	if len(msg.Params.WhiteKnightLiquidators) == 0 {
+		msg.Params.WhiteKnightLiquidators = currentParams.WhiteKnightLiquidators
+	}
+
+	// Cross-margin params: use the two Dec fields as the presence signal.
+	// Proto3 cannot distinguish "field omitted" from "field set to zero value" for
+	// non-Dec types (bool, uint32, slice). The Dec fields have a nil sentinel that
+	// reliably detects omission, so:
+	//
+	//   - Both Decs nil, no non-Dec field set → old client that predates cross-margin → backfill everything.
+	//   - Both Decs nil, non-Dec field set → reject: caller must also set at least one Dec to signal awareness.
+	//   - One Dec set → partial update: backfill the nil Dec AND zero-valued non-Dec fields
+	//     from current params (safe default to prevent accidental clearing).
+	//   - Both Decs set → full replacement: all fields taken as-is, including zeros.
+	//     Callers who need to clear/disable non-Dec fields (e.g. unpause, clear denoms)
+	//     MUST set both Decs to signal a complete CrossMarginParams replacement.
+	cm := &msg.Params.CrossMarginParams
+	bothDecsExplicit := !cm.PositiveUpnlHaircutRate.IsNil() && !cm.FeesBuffer.IsNil()
+
+	if cm.PositiveUpnlHaircutRate.IsNil() && cm.FeesBuffer.IsNil() {
+		if crossMarginHasNonZeroProto3Field(cm) {
+			return nil, errortypes.ErrInvalidRequest.Wrap(
+				"cross_margin_params: when setting non-decimal fields (enabled_quote_denoms, perpetual_enabled, " +
+					"expiry_enabled, max_active_derivative_markets_per_pool, emergency_paused), at least one decimal " +
+					"field (positive_upnl_haircut_rate or fees_buffer) must also be provided to signal cross-margin awareness",
+			)
+		}
+		msg.Params.CrossMarginParams = currentParams.CrossMarginParams
+	} else {
+		if cm.PositiveUpnlHaircutRate.IsNil() {
+			cm.PositiveUpnlHaircutRate = currentParams.CrossMarginParams.PositiveUpnlHaircutRate
+		}
+		if cm.FeesBuffer.IsNil() {
+			cm.FeesBuffer = currentParams.CrossMarginParams.FeesBuffer
+		}
+		// When only one Dec is set (partial update), backfill zero-valued non-Dec fields
+		// from current params to prevent accidental clearing. When both Decs are set
+		// (full replacement), take all fields as-is to allow clearing/disabling settings.
+		if !bothDecsExplicit {
+			currentCM := &currentParams.CrossMarginParams
+			if len(cm.EnabledQuoteDenoms) == 0 {
+				cm.EnabledQuoteDenoms = currentCM.EnabledQuoteDenoms
+			}
+			if !cm.PerpetualEnabled {
+				cm.PerpetualEnabled = currentCM.PerpetualEnabled
+			}
+			if !cm.ExpiryEnabled {
+				cm.ExpiryEnabled = currentCM.ExpiryEnabled
+			}
+			if cm.MaxActiveDerivativeMarketsPerPool == 0 {
+				cm.MaxActiveDerivativeMarketsPerPool = currentCM.MaxActiveDerivativeMarketsPerPool
+			}
+			if !cm.EmergencyPaused {
+				cm.EmergencyPaused = currentCM.EmergencyPaused
+			}
+		}
+	}
+
 	if err := msg.Params.Validate(); err != nil {
 		return nil, err
+	}
+
+	// Detect emergency pause activation: cancel all cross-margin orders immediately
+	// so the orderbook doesn't contain unmatchable ghost orders during the pause.
+	emergencyPauseActivated := msg.Params.CrossMarginParams.EmergencyPaused && !currentParams.CrossMarginParams.EmergencyPaused
+	if emergencyPauseActivated {
+		k.CancelAllCrossMarginOrdersOnEmergencyPause(ctx)
 	}
 
 	k.SetParams(ctx, msg.Params)
@@ -354,4 +434,16 @@ func (k GeneralMsgServer) ActivatePostOnlyMode(
 	}
 
 	return &v2.MsgActivatePostOnlyModeResponse{}, nil
+}
+
+// crossMarginHasNonZeroProto3Field returns true when at least one non-Dec field in
+// CrossMarginParams has a value that differs from its proto3 zero value. This detects
+// the case where a caller set a non-Dec field (e.g. EmergencyPaused=true) without
+// providing any Dec field as a cross-margin awareness signal.
+func crossMarginHasNonZeroProto3Field(cm *v2.CrossMarginParams) bool {
+	return len(cm.EnabledQuoteDenoms) > 0 ||
+		cm.PerpetualEnabled ||
+		cm.ExpiryEnabled ||
+		cm.MaxActiveDerivativeMarketsPerPool > 0 ||
+		cm.EmergencyPaused
 }

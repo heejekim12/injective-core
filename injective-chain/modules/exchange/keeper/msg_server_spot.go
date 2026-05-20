@@ -158,6 +158,8 @@ func (k SpotMsgServer) CreateSpotLimitOrder(
 	}
 
 	account, _ := sdk.AccAddressFromBech32(msg.Sender)
+	// Note: Spot orders use isolated (per-order) holds for all subaccounts, including cross-margin.
+	// Cross-margin pooling applies only to derivative positions; spot-as-collateral is not supported.
 	orderHash, err := k.SpotKeeper.CreateSpotLimitOrder(ctx, account, &msg.Order, nil)
 	if err != nil {
 		return nil, err
@@ -181,6 +183,8 @@ func (k SpotMsgServer) CreateSpotMarketOrder(
 	}
 
 	sender := sdk.MustAccAddressFromBech32(msg.Sender)
+	// Note: Spot orders use isolated (per-order) holds for all subaccounts, including cross-margin.
+	// Cross-margin pooling applies only to derivative positions; spot-as-collateral is not supported.
 
 	marketOrderResults, orderHash, err := k.createSpotMarketOrderWithResultsForAtomicExecution(ctx, sender, &msg.Order, nil)
 	if err != nil {
@@ -227,6 +231,8 @@ func (k SpotMsgServer) BatchCreateSpotLimitOrders(
 
 	for idx := range msg.Orders {
 		order := msg.Orders[idx]
+		// Note: Spot orders use isolated (per-order) holds for all subaccounts, including cross-margin.
+		// Cross-margin pooling applies only to derivative positions; spot-as-collateral is not supported.
 		if orderHash, err := k.SpotKeeper.CreateSpotLimitOrder(ctx, sender, &order, nil); err != nil {
 
 			sdkerror := &sdkerrors.Error{}

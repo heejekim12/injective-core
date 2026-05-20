@@ -18,8 +18,8 @@ yes 12345678 | injectived \
   --json-rpc.allow-unprotected-txs=true \
   --json-rpc.txfee-cap=50 \
   --optimistic-execution-enabled true \
-  --metrics-enable-metrics true \
-  --metrics-enable-tracing true \
-  --metrics-insecure true \
+  --metrics.metrics-enabled true \
+  --metrics.tracing-enabled true \
+  --metrics.insecure-endpoint true \
   --home "$INJHOME" \
 start

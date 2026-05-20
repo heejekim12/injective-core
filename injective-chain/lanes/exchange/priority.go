@@ -20,7 +20,8 @@ func hasOnlyLiquidationMessages(tx sdk.Tx) bool {
 	for _, msg := range tx.GetMsgs() {
 		msgTypeURL := sdk.MsgTypeURL(msg)
 		isLiquidationMsg := msgTypeURL == "/injective.exchange.v1beta1.MsgLiquidatePosition" ||
-			msgTypeURL == "/injective.exchange.v2.MsgLiquidatePosition"
+			msgTypeURL == "/injective.exchange.v2.MsgLiquidatePosition" ||
+			msgTypeURL == "/injective.exchange.v2.MsgBatchLiquidatePositions"
 		if !isLiquidationMsg {
 			return false
 		}

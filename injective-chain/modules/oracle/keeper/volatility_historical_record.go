@@ -1,124 +1,116 @@
 package keeper
 
 import (
-	"sort"
+	"cmp"
+	"encoding/binary"
+	"slices"
 
 	"cosmossdk.io/math"
 	"cosmossdk.io/store/prefix"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 func (k *Keeper) AppendPriceRecord(ctx sdk.Context, oracleType types.OracleType, symbol string, priceRecord *types.PriceRecord) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "AppendPriceRecord")()
 
-	existingOrEmptyRecord, _ := k.GetHistoricalPriceRecords(ctx, oracleType, symbol, priceRecord.Timestamp-types.MaxHistoricalPriceRecordAge)
-
-	recordsLen := len(existingOrEmptyRecord.LatestPriceRecords)
-	// edge case: if the priceRecord timestamp matches the last timestamp of the last record, overwrite the last record
-	if recordsLen > 0 && existingOrEmptyRecord.LatestPriceRecords[recordsLen-1].Timestamp == priceRecord.Timestamp {
-		existingOrEmptyRecord.LatestPriceRecords[recordsLen-1] = priceRecord
-	} else {
-		existingOrEmptyRecord.LatestPriceRecords = append(existingOrEmptyRecord.LatestPriceRecords, priceRecord)
-	}
-
-	k.setHistoricalPriceRecords(ctx, oracleType, symbol, existingOrEmptyRecord)
-	k.updateLastPriceTimestampMap(ctx, oracleType, symbol, priceRecord.Timestamp)
-}
-
-func (k *Keeper) updateLastPriceTimestampMap(ctx sdk.Context, oracleType types.OracleType, symbol string, timestamp int64) {
-	defer k.Meter(ctx).FuncTiming(&ctx, "updateLastPriceTimestampMap")()
-
-	var lastPriceTimestamps types.LastPriceTimestamps
-
 	store := k.getStore(ctx)
-	bz := store.Get(types.SymbolsMapLastPriceTimestampsKey)
-	if bz == nil {
-		lastPriceTimestamps = types.LastPriceTimestamps{
-			LastPriceTimestamps: make([]*types.SymbolPriceTimestamp, 0, 1),
-		}
-	} else {
-		k.cdc.MustUnmarshal(bz, &lastPriceTimestamps)
+	key := types.GetSymbolHistoricalPriceRecordKey(oracleType, symbol, priceRecord.Timestamp)
+	bz, err := priceRecord.Price.Marshal()
+	if err != nil {
+		return
 	}
-
-	lastPriceTimestamps.LastPriceTimestamps = types.SymbolPriceTimestamps(lastPriceTimestamps.LastPriceTimestamps).
-		SetTimestamp(oracleType, symbol, timestamp)
-
-	k.setLastPriceTimestampMap(ctx, &lastPriceTimestamps)
-}
-
-type symbolRef struct {
-	Oracle types.OracleType
-	Symbol string
+	store.Set(key, bz)
 }
 
 func (k *Keeper) CleanupHistoricalPriceRecords(ctx sdk.Context) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "CleanupHistoricalPriceRecords")()
 
-	var lastPriceTimestamps types.LastPriceTimestamps
-
 	store := k.getStore(ctx)
-	bz := store.Get(types.SymbolsMapLastPriceTimestampsKey)
-	if bz == nil {
-		// no entry at all
-		return
-	} else {
-		k.cdc.MustUnmarshal(bz, &lastPriceTimestamps)
-	}
-
-	symbolsToCleanup := make([]symbolRef, 0, len(lastPriceTimestamps.LastPriceTimestamps))
-	symbolsToDrop := make([]symbolRef, 0, len(lastPriceTimestamps.LastPriceTimestamps))
-
 	before := ctx.BlockTime().Unix() - types.MaxHistoricalPriceRecordAge
-	for _, entry := range lastPriceTimestamps.LastPriceTimestamps {
-		if entry.Timestamp < before {
-			symbolsToDrop = append(symbolsToDrop, symbolRef{
-				Oracle: entry.Oracle,
-				Symbol: entry.SymbolId,
-			})
-			continue
-		}
+	endTsBytes := sdk.Uint64ToBigEndian(uint64(before))
 
-		symbolsToCleanup = append(symbolsToCleanup, symbolRef{
-			Oracle: entry.Oracle,
-			Symbol: entry.SymbolId,
+	cursor := store.Get(types.CleanupCursorKey)
+	histStore := prefix.NewStore(store, types.SymbolHistoricalPriceRecordsPrefix)
+
+	type symKey struct {
+		ot  types.OracleType
+		sym string
+	}
+	var batch []symKey
+	var nextCursor []byte
+	var curOt types.OracleType
+	var curSym string
+	seenAny := false
+
+	chaintypes.IterateKeysSafe(histStore.Iterator(cursor, nil), func(rawKey []byte) bool {
+		fullKey := append(append([]byte{}, types.SymbolHistoricalPriceRecordsPrefix...), rawKey...)
+		ot, sym, _, ok := types.ParseSymbolHistoricalPriceRecordKey(fullKey)
+		if !ok {
+			return false
+		}
+		if !seenAny || ot != curOt || sym != curSym {
+			if seenAny {
+				batch = append(batch, symKey{ot: curOt, sym: curSym})
+				if len(batch) >= types.MaxSymbolsPerCleanupRound {
+					nextCursor = rawKey
+					return true
+				}
+			}
+			curOt, curSym, seenAny = ot, sym, true
+		}
+		return false
+	})
+
+	if seenAny && nextCursor == nil {
+		batch = append(batch, symKey{ot: curOt, sym: curSym})
+	}
+
+	for _, sk := range batch {
+		prefixKey := types.GetSymbolHistoricalPriceRecordPrefix(sk.ot, sk.sym)
+		sub := prefix.NewStore(store, prefixKey)
+		var toDelete [][]byte
+		chaintypes.IterateKeysSafe(sub.Iterator(nil, endTsBytes), func(tsKey []byte) bool {
+			toDelete = append(toDelete, tsKey)
+			return false
 		})
-	}
-
-	for _, ref := range symbolsToDrop {
-		store.Delete(types.GetSymbolHistoricalPriceRecordsKey(ref.Oracle, ref.Symbol))
-	}
-
-	for _, ref := range symbolsToCleanup {
-		existingOrEmptyRecord, omitted := k.GetHistoricalPriceRecords(ctx, ref.Oracle, ref.Symbol, before)
-		if omitted {
-			k.setHistoricalPriceRecords(ctx, ref.Oracle, ref.Symbol, existingOrEmptyRecord)
+		for _, dk := range toDelete {
+			sub.Delete(dk)
 		}
+	}
+
+	if nextCursor != nil {
+		store.Set(types.CleanupCursorKey, nextCursor)
+	} else {
+		store.Delete(types.CleanupCursorKey)
 	}
 }
 
-func (k *Keeper) setHistoricalPriceRecords(
+func (k *Keeper) loadAllHistoricalPriceRecordsForSymbol(
 	ctx sdk.Context,
 	oracleType types.OracleType,
 	symbol string,
-	entry *types.PriceRecords,
-) {
-	defer k.Meter(ctx).FuncTiming(&ctx, "setHistoricalPriceRecords")()
-
+) []*types.PriceRecord {
 	store := k.getStore(ctx)
+	prefixKey := types.GetSymbolHistoricalPriceRecordPrefix(oracleType, symbol)
+	sub := prefix.NewStore(store, prefixKey)
 
-	bz := k.cdc.MustMarshal(entry)
-	store.Set(types.GetSymbolHistoricalPriceRecordsKey(oracleType, symbol), bz)
-}
-
-func (k *Keeper) setLastPriceTimestampMap(ctx sdk.Context, entry *types.LastPriceTimestamps) {
-	defer k.Meter(ctx).FuncTiming(&ctx, "setLastPriceTimestampMap")()
-
-	store := k.getStore(ctx)
-
-	bz := k.cdc.MustMarshal(entry)
-	store.Set(types.SymbolsMapLastPriceTimestampsKey, bz)
+	var out []*types.PriceRecord
+	chaintypes.IterateSafe(sub.Iterator(nil, nil), func(k, v []byte) bool {
+		if len(k) != 8 {
+			return false
+		}
+		ts := int64(binary.BigEndian.Uint64(k))
+		var price math.LegacyDec
+		if err := price.Unmarshal(v); err != nil {
+			return false
+		}
+		out = append(out, &types.PriceRecord{Timestamp: ts, Price: price})
+		return false
+	})
+	return out
 }
 
 // GetMixedHistoricalPriceRecords returns the merged historical prices from two separate price feeds.
@@ -137,27 +129,8 @@ func (k *Keeper) GetMixedHistoricalPriceRecords(
 ) (mixed *types.PriceRecords, ok bool) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetMixedHistoricalPriceRecords")()
 
-	store := k.getStore(ctx)
-
-	baseBz := store.Get(types.GetSymbolHistoricalPriceRecordsKey(baseOracleType, baseSymbol))
-	if baseBz == nil {
-		return nil, false
-	}
-
-	quoteBz := store.Get(types.GetSymbolHistoricalPriceRecordsKey(quoteOracleType, quoteSymbol))
-	if quoteBz == nil {
-		return nil, false
-	}
-
-	var (
-		basePriceEntry  types.PriceRecords
-		quotePriceEntry types.PriceRecords
-	)
-	k.cdc.MustUnmarshal(baseBz, &basePriceEntry)
-	k.cdc.MustUnmarshal(quoteBz, &quotePriceEntry)
-
-	basePriceRecords := basePriceEntry.LatestPriceRecords
-	quotePriceRecords := quotePriceEntry.LatestPriceRecords
+	basePriceRecords := k.loadAllHistoricalPriceRecordsForSymbol(ctx, baseOracleType, baseSymbol)
+	quotePriceRecords := k.loadAllHistoricalPriceRecordsForSymbol(ctx, quoteOracleType, quoteSymbol)
 
 	if len(basePriceRecords) == 0 || len(quotePriceRecords) == 0 {
 		return nil, false
@@ -220,9 +193,7 @@ func (k *Keeper) GetMixedHistoricalPriceRecords(
 	}
 
 	// NOTE: uniqueTimestamps contains reverse sorted mixed timeline from both records
-	sort.Slice(uniqueTimestamps, func(i, j int) bool {
-		return uniqueTimestamps[i] < uniqueTimestamps[j]
-	})
+	slices.SortFunc(uniqueTimestamps, cmp.Compare)
 
 	for idx, t0 := range uniqueTimestamps {
 		basePrice, baseExists := basePriceTimestampMap[t0]
@@ -274,47 +245,88 @@ func (k *Keeper) GetHistoricalPriceRecords(
 	oracleType types.OracleType,
 	symbol string,
 	from int64,
-) (entry *types.PriceRecords, omitted bool) {
+) *types.PriceRecords {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetHistoricalPriceRecords")()
 
-	entry = &types.PriceRecords{
+	entry := &types.PriceRecords{
 		Oracle:   oracleType,
 		SymbolId: symbol,
 	}
 
 	store := k.getStore(ctx)
-	bz := store.Get(types.GetSymbolHistoricalPriceRecordsKey(oracleType, symbol))
-	if bz == nil {
-		return entry, false
+	prefixKey := types.GetSymbolHistoricalPriceRecordPrefix(oracleType, symbol)
+	sub := prefix.NewStore(store, prefixKey)
+	var startKey []byte
+	if from > 0 {
+		startKey = sdk.Uint64ToBigEndian(uint64(from))
 	}
 
-	var priceEntry types.PriceRecords
-	k.cdc.MustUnmarshal(bz, &priceEntry)
+	chaintypes.IterateSafe(sub.Iterator(startKey, nil), func(k, v []byte) bool {
+		if len(k) != 8 {
+			return false
+		}
+		ts := int64(binary.BigEndian.Uint64(k))
+		var price math.LegacyDec
+		if err := price.Unmarshal(v); err != nil {
+			return false
+		}
+		entry.LatestPriceRecords = append(entry.LatestPriceRecords, &types.PriceRecord{
+			Timestamp: ts,
+			Price:     price,
+		})
+		return false
+	})
 
-	entry.LatestPriceRecords, omitted = filterHistoricalPriceRecords(priceEntry.LatestPriceRecords, from)
-
-	return entry, omitted
+	return entry
 }
 
 func (k *Keeper) GetAllHistoricalPriceRecords(ctx sdk.Context) []*types.PriceRecords {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetAllHistoricalPriceRecords")()
 
-	allPriceRecords := make([]*types.PriceRecords, 0)
-	store := ctx.KVStore(k.storeKey)
+	store := k.getStore(ctx)
+	histStore := prefix.NewStore(store, types.SymbolHistoricalPriceRecordsPrefix)
 
-	historicalPriceRecordsStore := prefix.NewStore(store, types.SymbolHistoricalPriceRecordsPrefix)
+	type groupKey struct {
+		ot  types.OracleType
+		sym string
+	}
+	recordsByGroup := make(map[groupKey][]*types.PriceRecord)
 
-	iterator := historicalPriceRecordsStore.Iterator(nil, nil)
-	defer iterator.Close()
+	chaintypes.IterateSafe(histStore.Iterator(nil, nil), func(k, v []byte) bool {
+		fullKey := append(append([]byte{}, types.SymbolHistoricalPriceRecordsPrefix...), k...)
+		ot, sym, ts, ok := types.ParseSymbolHistoricalPriceRecordKey(fullKey)
+		if !ok {
+			return false
+		}
+		var price math.LegacyDec
+		if err := price.Unmarshal(v); err != nil {
+			return false
+		}
+		gk := groupKey{ot: ot, sym: sym}
+		recordsByGroup[gk] = append(recordsByGroup[gk], &types.PriceRecord{
+			Timestamp: ts,
+			Price:     price,
+		})
+		return false
+	})
 
-	for ; iterator.Valid(); iterator.Next() {
-		var priceRecords types.PriceRecords
-		bz := iterator.Value()
-		k.cdc.MustUnmarshal(bz, &priceRecords)
-		allPriceRecords = append(allPriceRecords, &priceRecords)
+	out := make([]*types.PriceRecords, 0, len(recordsByGroup))
+	for gk, recs := range recordsByGroup {
+		out = append(out, &types.PriceRecords{
+			Oracle:             gk.ot,
+			SymbolId:           gk.sym,
+			LatestPriceRecords: recs,
+		})
 	}
 
-	return allPriceRecords
+	slices.SortStableFunc(out, func(a, b *types.PriceRecords) int {
+		if a.Oracle != b.Oracle {
+			return cmp.Compare(a.Oracle, b.Oracle)
+		}
+		return cmp.Compare(a.SymbolId, b.SymbolId)
+	})
+
+	return out
 }
 
 func filterHistoricalPriceRecords(
@@ -408,8 +420,8 @@ func CalculateStatistics(priceRecords []*types.PriceRecord) *types.MetadataStati
 	// compute median on copy so the slice sorting doesn't mess up the indexes above
 	recordsCopy := make([]*types.PriceRecord, 0, count)
 	recordsCopy = append(recordsCopy, priceRecords...)
-	sort.SliceStable(recordsCopy, func(i, j int) bool {
-		return recordsCopy[i].Price.LT(recordsCopy[j].Price)
+	slices.SortStableFunc(recordsCopy, func(a, b *types.PriceRecord) int {
+		return a.Price.BigInt().Cmp(b.Price.BigInt())
 	})
 
 	median := recordsCopy[count/2].Price
@@ -444,7 +456,7 @@ func (k *Keeper) GetOracleVolatility(
 
 	var priceRecords *types.PriceRecords
 
-	maxAge := int64(0)
+	maxAge := ctx.BlockTime().Unix() - int64(types.MaxHistoricalPriceRecordAge)
 	includeRawHistory := false
 	includeMetadata := false
 
@@ -457,7 +469,7 @@ func (k *Keeper) GetOracleVolatility(
 	}
 
 	if quote == nil || quote.Symbol == types.QuoteUSD {
-		priceRecords, _ = k.GetHistoricalPriceRecords(ctx, base.OracleType, base.Symbol, maxAge)
+		priceRecords = k.GetHistoricalPriceRecords(ctx, base.OracleType, base.Symbol, maxAge)
 	} else {
 		priceRecords, _ = k.GetMixedHistoricalPriceRecords(ctx, base.OracleType, quote.OracleType, base.Symbol, quote.Symbol, maxAge)
 	}

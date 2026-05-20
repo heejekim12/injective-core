@@ -369,6 +369,7 @@ func prepareAndBroadcastLaunchBatch(
 			Admin:            marketLauncher.FormattedAddress(),
 			AdminPermissions: 63, // max perms
 		},
+		CrossMarginEligible: true,
 	}
 	submitPropPerpLaunch := &govv1beta1.MsgSubmitProposal{
 		InitialDeposit: sdk.NewCoins(depositCoin),
@@ -397,6 +398,253 @@ func prepareAndBroadcastLaunchBatch(
 	// Wait for pass
 	_, err = WaitForProposalStatusByTime(ctx, chain, propIDs[0], govv1beta1.StatusPassed, proposalStatusTimeout, proposalStatusPollEvery)
 	require.NoError(t, err)
+}
+
+// LaunchAdditionalPerpMarkets launches N additional perp markets (indexed 1..count) with distinct
+// oracle pairs but the same quoteDenom. Each market goes through price feeder privilege, price relay,
+// insurance fund creation, and a PerpetualMarketLaunchProposal via governance.
+// Returns the launched FullDerivativeMarket objects.
+func LaunchAdditionalPerpMarkets(
+	t *testing.T,
+	ctx context.Context,
+	chain *cosmos.CosmosChain,
+	marketLauncher ibc.Wallet,
+	quoteDenom string,
+	count int,
+) []*exchangev2.FullDerivativeMarket {
+	t.Helper()
+
+	// Record existing market IDs so we can filter them from the final query
+	conn, err := grpc.NewClient(chain.GetHostGRPCAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	queryClient := exchangev2.NewQueryClient(conn)
+	existingResp, err := QueryRPC(ctx, queryClient.DerivativeMarkets, &exchangev2.QueryDerivativeMarketsRequest{})
+	require.NoError(t, err)
+	conn.Close()
+
+	existingIDs := make(map[string]bool, len(existingResp.Markets))
+	for _, m := range existingResp.Markets {
+		existingIDs[m.Market.MarketId] = true
+	}
+
+	proposalInitialDeposit := math.NewIntWithDecimal(1000, 18)
+	depositCoin := sdk.NewCoin(chain.Config().Denom, proposalInitialDeposit)
+	txOpts := []cosmos.FactoryOpt{WithGas(2_000_000)}
+
+	for i := 1; i <= count; i++ {
+		oracleBase := fmt.Sprintf("oracle_base_%d", i)
+		oracleQuote := fmt.Sprintf("oracle_quote_%d", i)
+
+		// 1. Grant price feeder privilege via governance proposal
+		propPriceFeeder := &oracletypes.GrantPriceFeederPrivilegeProposal{
+			Title:       fmt.Sprintf("Grant price feeder for market %d", i),
+			Description: fmt.Sprintf("Grant price feeder for market %d", i),
+			Base:        oracleBase,
+			Quote:       oracleQuote,
+			Relayers:    []string{marketLauncher.FormattedAddress()},
+		}
+		submitPropPriceFeeder := &govv1beta1.MsgSubmitProposal{
+			InitialDeposit: sdk.NewCoins(depositCoin),
+			Proposer:       marketLauncher.FormattedAddress(),
+		}
+		require.NoError(t, submitPropPriceFeeder.SetContent(propPriceFeeder))
+
+		txResp := BroadcastTxBlock(t, ctx, chain, marketLauncher, txOpts, submitPropPriceFeeder)
+		require.Equal(t, uint32(0), txResp.Code, "failed price feeder proposal for market %d: %s", i, txResp.RawLog)
+
+		propIDs, err := getProposalIDs(txResp.Events)
+		require.NoError(t, err)
+		require.Len(t, propIDs, 1)
+
+		txHashes, err := VoteOnProposalAllValidatorsRPC(t, ctx, chain, propIDs[0], govv1.VoteOption_VOTE_OPTION_YES)
+		require.NoError(t, err)
+		lastTxHash := txHashes[len(txHashes)-1]
+		_, err = getTxResponseRPC(ctx, chain.Nodes()[0], lastTxHash)
+		require.NoError(t, err)
+		_, err = WaitForProposalStatusByTime(ctx, chain, propIDs[0], govv1beta1.StatusPassed, proposalStatusTimeout, proposalStatusPollEvery)
+		require.NoError(t, err)
+
+		// 2. Relay price, create insurance fund, launch perp market via proposal
+		msgs := []sdk.Msg{}
+
+		relayPrice := &oracletypes.MsgRelayPriceFeedPrice{
+			Sender: marketLauncher.FormattedAddress(),
+			Base:   []string{oracleBase},
+			Quote:  []string{oracleQuote},
+			Price:  []math.LegacyDec{math.LegacyMustNewDecFromStr("10.00")},
+		}
+		msgs = append(msgs, relayPrice)
+
+		createInsurance := &insurancetypes.MsgCreateInsuranceFund{
+			Sender:         marketLauncher.FormattedAddress(),
+			Ticker:         fmt.Sprintf("market_%d / usdt", i),
+			QuoteDenom:     quoteDenom,
+			OracleBase:     oracleBase,
+			OracleQuote:    oracleQuote,
+			OracleType:     oracletypes.OracleType_PriceFeed,
+			Expiry:         -1,
+			InitialDeposit: sdk.NewCoin(quoteDenom, math.NewInt(1000000000)),
+		}
+		msgs = append(msgs, createInsurance)
+
+		propPerpLaunch := &exchangev2.PerpetualMarketLaunchProposal{
+			Title:                  fmt.Sprintf("Launch perp market %d", i),
+			Description:            fmt.Sprintf("Launch perp market %d", i),
+			Ticker:                 fmt.Sprintf("market_%d / usdt", i),
+			QuoteDenom:             quoteDenom,
+			OracleBase:             oracleBase,
+			OracleQuote:            oracleQuote,
+			OracleScaleFactor:      0,
+			OracleType:             oracletypes.OracleType_PriceFeed,
+			InitialMarginRatio:     math.LegacyNewDecWithPrec(5, 2),
+			MaintenanceMarginRatio: math.LegacyNewDecWithPrec(2, 2),
+			ReduceMarginRatio:      math.LegacyNewDecWithPrec(8, 2),
+			MakerFeeRate:           math.LegacyNewDecWithPrec(1, 3),
+			TakerFeeRate:           math.LegacyNewDecWithPrec(3, 3),
+			MinPriceTickSize:       math.LegacyNewDecWithPrec(1, 4),
+			MinQuantityTickSize:    math.LegacyNewDecWithPrec(1, 4),
+			MinNotional:            math.LegacyOneDec(),
+			OpenNotionalCap: exchangev2.OpenNotionalCap{
+				Cap: &exchangev2.OpenNotionalCap_Uncapped{
+					Uncapped: &exchangev2.OpenNotionalCapUncapped{},
+				},
+			},
+			AdminInfo: &exchangev2.AdminInfo{
+				Admin:            marketLauncher.FormattedAddress(),
+				AdminPermissions: 63,
+			},
+			CrossMarginEligible: true,
+		}
+		submitPropPerpLaunch := &govv1beta1.MsgSubmitProposal{
+			InitialDeposit: sdk.NewCoins(depositCoin),
+			Proposer:       marketLauncher.FormattedAddress(),
+		}
+		require.NoError(t, submitPropPerpLaunch.SetContent(propPerpLaunch))
+		msgs = append(msgs, submitPropPerpLaunch)
+
+		txResp = BroadcastTxBlock(t, ctx, chain, marketLauncher, txOpts, msgs...)
+		require.Equal(t, uint32(0), txResp.Code, "failed launch batch for market %d: %s", i, txResp.RawLog)
+
+		propIDs, err = getProposalIDs(txResp.Events)
+		require.NoError(t, err)
+		require.Len(t, propIDs, 1)
+
+		txHashes, err = VoteOnProposalAllValidatorsRPC(t, ctx, chain, propIDs[0], govv1.VoteOption_VOTE_OPTION_YES)
+		require.NoError(t, err)
+		lastTxHash = txHashes[len(txHashes)-1]
+		_, err = getTxResponseRPC(ctx, chain.Nodes()[0], lastTxHash)
+		require.NoError(t, err)
+		_, err = WaitForProposalStatusByTime(ctx, chain, propIDs[0], govv1beta1.StatusPassed, proposalStatusTimeout, proposalStatusPollEvery)
+		require.NoError(t, err)
+
+		t.Logf("launched additional perp market %d", i)
+	}
+
+	// Query all derivative markets and return only the newly launched ones
+	conn, err = grpc.NewClient(chain.GetHostGRPCAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	defer conn.Close()
+
+	queryClient = exchangev2.NewQueryClient(conn)
+	derivResp, err := QueryRPC(ctx, queryClient.DerivativeMarkets, &exchangev2.QueryDerivativeMarketsRequest{})
+	require.NoError(t, err, "error querying derivative markets")
+
+	var newMarkets []*exchangev2.FullDerivativeMarket
+	for _, m := range derivResp.Markets {
+		if !existingIDs[m.Market.MarketId] {
+			newMarkets = append(newMarkets, m)
+		}
+	}
+	require.Len(t, newMarkets, count, "expected %d new derivative markets", count)
+	return newMarkets
+}
+
+// EnableCrossMarginForDenom enables cross-margin for the given quote denom by updating
+// exchange params via a governance proposal (MsgUpdateParams).
+func EnableCrossMarginForDenom(
+	t *testing.T,
+	ctx context.Context,
+	chain *cosmos.CosmosChain,
+	marketLauncher ibc.Wallet,
+	quoteDenom string,
+) {
+	t.Helper()
+
+	// Query current params
+	params, err := QueryExchangeParams(ctx, chain)
+	require.NoError(t, err, "error querying exchange params")
+
+	// Ensure MinPostOnlyModeDowntimeDuration is valid — genesis may set it to ""
+	// which passes chain init but fails MsgUpdateParams validation.
+	if params.MinPostOnlyModeDowntimeDuration == "" {
+		params.MinPostOnlyModeDowntimeDuration = "DURATION_30S"
+	}
+
+	// Update cross-margin params
+	params.CrossMarginParams.EnabledQuoteDenoms = []string{quoteDenom}
+	params.CrossMarginParams.PerpetualEnabled = true
+	params.CrossMarginParams.MaxActiveDerivativeMarketsPerPool = 10
+
+	// Submit MsgUpdateParams via governance
+	authority := authtypes.NewModuleAddress(govtypes.ModuleName).String()
+	msgUpdateParams := &exchangev2.MsgUpdateParams{
+		Authority: authority,
+		Params:    *params,
+	}
+
+	propEncoded, err := codectypes.NewAnyWithValue(msgUpdateParams)
+	require.NoError(t, err)
+
+	proposalInitialDeposit := math.NewIntWithDecimal(1000, 18)
+	depositCoin := sdk.NewCoin(chain.Config().Denom, proposalInitialDeposit)
+
+	submitProp := &govv1.MsgSubmitProposal{
+		InitialDeposit: []sdk.Coin{depositCoin},
+		Proposer:       marketLauncher.FormattedAddress(),
+		Title:          "Enable cross-margin for " + quoteDenom,
+		Summary:        "Enable cross-margin for " + quoteDenom,
+		Messages:       []*codectypes.Any{propEncoded},
+	}
+
+	txOpts := []cosmos.FactoryOpt{WithGas(2_000_000)}
+	txResp := BroadcastTxBlock(t, ctx, chain, marketLauncher, txOpts, submitProp)
+	require.Equal(t, uint32(0), txResp.Code, "failed cross-margin proposal: %s", txResp.RawLog)
+
+	propIDs, err := getProposalIDs(txResp.Events)
+	require.NoError(t, err)
+	require.Len(t, propIDs, 1)
+
+	txHashes, err := VoteOnProposalAllValidatorsRPC(t, ctx, chain, propIDs[0], govv1.VoteOption_VOTE_OPTION_YES)
+	require.NoError(t, err)
+	lastTxHash := txHashes[len(txHashes)-1]
+	_, err = getTxResponseRPC(ctx, chain.Nodes()[0], lastTxHash)
+	require.NoError(t, err)
+	_, err = WaitForProposalStatusByTime(ctx, chain, propIDs[0], govv1beta1.StatusPassed, proposalStatusTimeout, proposalStatusPollEvery)
+	require.NoError(t, err)
+
+	t.Logf("enabled cross-margin for quote denom %s", quoteDenom)
+}
+
+// DepositToSubaccount deposits funds into a subaccount via MsgDeposit.
+func DepositToSubaccount(
+	t *testing.T,
+	ctx context.Context,
+	chain *cosmos.CosmosChain,
+	user ibc.Wallet,
+	subaccountID string,
+	coin sdk.Coin,
+) {
+	t.Helper()
+
+	msg := &exchangev2.MsgDeposit{
+		Sender:       user.FormattedAddress(),
+		SubaccountId: subaccountID,
+		Amount:       coin,
+	}
+
+	txOpts := []cosmos.FactoryOpt{WithGas(800_000)}
+	txResp := BroadcastTxBlock(t, ctx, chain, user, txOpts, msg)
+	require.Equal(t, uint32(0), txResp.Code, "failed deposit: %s", txResp.RawLog)
 }
 
 func getProposalIDs(events []abciv1.Event) ([]uint64, error) {

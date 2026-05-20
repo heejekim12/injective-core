@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	cosmoserrors "cosmossdk.io/errors"
+	"cosmossdk.io/math"
 	storetypes "cosmossdk.io/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
@@ -28,8 +29,10 @@ var enabledOracleTypes = map[oracletypes.OracleType]struct{}{
 	oracletypes.OracleType_API3:                 {},
 	oracletypes.OracleType_Uma:                  {},
 	oracletypes.OracleType_Pyth:                 {},
+	oracletypes.OracleType_PythPro:              {},
 	oracletypes.OracleType_Stork:                {},
 	oracletypes.OracleType_ChainlinkDataStreams: {},
+	oracletypes.OracleType_SedaFast:             {},
 }
 
 // NewDerivativesMsgServerImpl returns an implementation of the exchange MsgServer interface for the provided Keeper
@@ -84,7 +87,7 @@ func (k DerivativesMsgServer) InstantPerpetualMarketLaunch(
 		msg.OracleScaleFactor, msg.OracleType, msg.InitialMarginRatio,
 		msg.MaintenanceMarginRatio, msg.ReduceMarginRatio, msg.MakerFeeRate, msg.TakerFeeRate,
 		msg.MinPriceTickSize, msg.MinQuantityTickSize, msg.MinNotional, msg.OpenNotionalCap,
-		&adminInfo,
+		&adminInfo, msg.CrossMarginEligible,
 	)
 	if err != nil {
 		k.Logger(ctx).Error("failed launching derivative market", err)
@@ -140,7 +143,7 @@ func (k DerivativesMsgServer) InstantExpiryFuturesMarketLaunch(
 		msg.OracleBase, msg.OracleQuote, msg.OracleScaleFactor, msg.OracleType, msg.Expiry,
 		msg.InitialMarginRatio, msg.MaintenanceMarginRatio, msg.ReduceMarginRatio,
 		msg.MakerFeeRate, msg.TakerFeeRate, msg.MinPriceTickSize, msg.MinQuantityTickSize,
-		msg.MinNotional, msg.OpenNotionalCap, &adminInfo,
+		msg.MinNotional, msg.OpenNotionalCap, &adminInfo, msg.CrossMarginEligible,
 	); err != nil {
 		k.Logger(ctx).Error("failed launching derivative market", err)
 		return nil, err
@@ -158,52 +161,68 @@ func (k DerivativesMsgServer) UpdateDerivativeMarket(c context.Context, msg *v2.
 		return nil, cosmoserrors.Wrap(types.ErrDerivativeMarketNotFound, "unknown market id")
 	}
 
-	switch {
-	case market.Admin == "":
-		if !k.IsAdmin(ctx, msg.Admin) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "no market admin defined and sender is not an exchange module admin")
-		}
-	case market.Admin != msg.Admin:
-		return nil, cosmoserrors.Wrapf(types.ErrInvalidAccessLevel, "market belongs to another admin (%v)", market.Admin)
-	default:
-		// only check permissions if the market has an admin
+	hasCrossMarginEligibilityUpdate := msg.HasCrossMarginEligibilityUpdate()
+	hasMarketAdminUpdate := msg.HasTickerUpdate() ||
+		msg.HasMinPriceTickSizeUpdate() ||
+		msg.HasMinQuantityTickSizeUpdate() ||
+		msg.HasMinNotionalUpdate() ||
+		msg.HasInitialMarginRatioUpdate() ||
+		msg.HasMaintenanceMarginRatioUpdate() ||
+		msg.HasReduceMarginRatioUpdate() ||
+		msg.HasOpenNotionalCapUpdate()
 
-		if market.AdminPermissions == 0 {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "no permissions found")
-		}
+	if hasCrossMarginEligibilityUpdate && !k.IsAdmin(ctx, msg.Admin) {
+		return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "only exchange module admins can update cross_margin_eligibility")
+	}
 
-		permissions := types.MarketAdminPermissions(market.AdminPermissions)
+	if hasMarketAdminUpdate || !hasCrossMarginEligibilityUpdate {
+		switch {
+		case market.Admin == "":
+			if !k.IsAdmin(ctx, msg.Admin) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "no market admin defined and sender is not an exchange module admin")
+			}
+		case market.Admin != msg.Admin:
+			return nil, cosmoserrors.Wrapf(types.ErrInvalidAccessLevel, "market belongs to another admin (%v)", market.Admin)
+		default:
+			// only check permissions if the market has an admin
 
-		if msg.HasTickerUpdate() && !permissions.HasPerm(types.TickerPerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update ticker")
-		}
+			if market.AdminPermissions == 0 {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "no permissions found")
+			}
 
-		if msg.HasMinPriceTickSizeUpdate() && !permissions.HasPerm(types.MinPriceTickSizePerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update min_price_tick_size")
-		}
+			permissions := types.MarketAdminPermissions(market.AdminPermissions)
 
-		if msg.HasMinQuantityTickSizeUpdate() && !permissions.HasPerm(types.MinQuantityTickSizePerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update min_quantity_tick_size")
-		}
+			if msg.HasTickerUpdate() && !permissions.HasPerm(types.TickerPerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update ticker")
+			}
 
-		if msg.HasMinNotionalUpdate() && !permissions.HasPerm(types.MinNotionalPerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update market min_notional")
-		}
+			if msg.HasMinPriceTickSizeUpdate() && !permissions.HasPerm(types.MinPriceTickSizePerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update min_price_tick_size")
+			}
 
-		if msg.HasInitialMarginRatioUpdate() && !permissions.HasPerm(types.InitialMarginRatioPerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update initial_margin_ratio")
-		}
+			if msg.HasMinQuantityTickSizeUpdate() && !permissions.HasPerm(types.MinQuantityTickSizePerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update min_quantity_tick_size")
+			}
 
-		if msg.HasMaintenanceMarginRatioUpdate() && !permissions.HasPerm(types.MaintenanceMarginRatioPerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update maintenance_margin_ratio")
-		}
+			if msg.HasMinNotionalUpdate() && !permissions.HasPerm(types.MinNotionalPerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update market min_notional")
+			}
 
-		if msg.HasReduceMarginRatioUpdate() && !permissions.HasPerm(types.ReduceMarginRatioPerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update reduce_margin_ratio")
-		}
+			if msg.HasInitialMarginRatioUpdate() && !permissions.HasPerm(types.InitialMarginRatioPerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update initial_margin_ratio")
+			}
 
-		if msg.HasOpenNotionalCapUpdate() && !permissions.HasPerm(types.OpenNotionalCapPerm) {
-			return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update open_notional_cap")
+			if msg.HasMaintenanceMarginRatioUpdate() && !permissions.HasPerm(types.MaintenanceMarginRatioPerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update maintenance_margin_ratio")
+			}
+
+			if msg.HasReduceMarginRatioUpdate() && !permissions.HasPerm(types.ReduceMarginRatioPerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update reduce_margin_ratio")
+			}
+
+			if msg.HasOpenNotionalCapUpdate() && !permissions.HasPerm(types.OpenNotionalCapPerm) {
+				return nil, cosmoserrors.Wrap(types.ErrInvalidAccessLevel, "admin does not have permission to update open_notional_cap")
+			}
 		}
 	}
 
@@ -269,6 +288,10 @@ func (k DerivativesMsgServer) UpdateDerivativeMarket(c context.Context, msg *v2.
 
 	if market.ReduceMarginRatio.LT(market.InitialMarginRatio) {
 		return nil, types.ErrMarginsRelation
+	}
+
+	if hasCrossMarginEligibilityUpdate {
+		market.CrossMarginEligible = msg.CrossMarginEligibility == v2.CrossMarginEligibility_CM_ELIGIBILITY_ELIGIBLE
 	}
 
 	k.SetDerivativeMarketWithInfo(ctx, market, nil, nil, nil)
@@ -501,6 +524,9 @@ func (k DerivativesMsgServer) IncreasePositionMargin(
 		destinationSubaccountID = types.MustGetSubaccountIDOrDeriveFromNonce(sender, msg.DestinationSubaccountId)
 		marketID                = common.HexToHash(msg.MarketId)
 	)
+	// Cross-margin note: When source == destination, this moves funds from QuoteBalance to
+	// PositionMarginTotal within the same pool — net equity is unchanged. When source != destination
+	// and source is CROSS, funds leave the source pool and we must enforce maintenance/admission.
 
 	market := k.GetDerivativeMarket(ctx, marketID, true)
 	if market == nil {
@@ -508,11 +534,64 @@ func (k DerivativesMsgServer) IncreasePositionMargin(
 		return nil, types.ErrDerivativeMarketNotFound.Wrapf("active derivative market for marketID %s not found", marketID.Hex())
 	}
 
+	// Cross margin: if source != destination and source is CROSS, funds leave the source pool.
+	// Enforce portfolio-level maintenance and order admission (mirrors DecreasePositionMargin).
+	//
+	// Skip for default source subaccounts: DecrementDepositOrChargeFromBank may charge from bank
+	// balance, which is excluded from cross-margin QuoteBalance. Running the pre-check would
+	// incorrectly assume the full amount leaves the pool, rejecting valid bank-funded operations.
 	chainFormatAmount := market.NotionalToChainFormat(msg.Amount)
+
+	if sourceSubaccountID != destinationSubaccountID && !types.IsDefaultSubaccountID(sourceSubaccountID) {
+		profile, _ := k.RiskEngine().EffectiveProfile(ctx, sourceSubaccountID)
+		if profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+			effectiveNotional := msg.Amount
+
+			snapshot, err := k.RiskEngine().BuildCrossPoolSnapshot(ctx, sourceSubaccountID, market.QuoteDenom, market.QuoteDecimals)
+			if err != nil {
+				return nil, err
+			}
+
+			// No positions and no orders: the pool has no risk exposure, so the transfer
+			// is unconditionally safe. Mirrors the zero-risk bypass in
+			// ensureCrossMarginMaintenanceAfterCollateralDecrease.
+			if snapshot.MaintenanceMarginTotal.IsPositive() || snapshot.OrderLockRequirement.IsPositive() {
+				equityLiqAfter := snapshot.EquityLiquidation.Sub(effectiveNotional)
+				equityAdmAfter := snapshot.EquityAdmission.Sub(effectiveNotional)
+
+				// Emergency pause: strip positive UPnL to enforce isolated-margin-level maintenance.
+				if k.GetParams(ctx).CrossMarginParams.EmergencyPaused {
+					equityLiqAfter, equityAdmAfter = snapshot.StripPositiveUPnL(equityLiqAfter, equityAdmAfter)
+				}
+
+				if equityLiqAfter.LT(snapshot.MaintenanceMarginTotal) {
+					return nil, cosmoserrors.Wrapf(
+						types.ErrInsufficientMargin,
+						"cross-margin maintenance check failed after position margin increase: equity_after %s < maintenance %s",
+						equityLiqAfter.String(),
+						snapshot.MaintenanceMarginTotal.String(),
+					)
+				}
+
+				if !k.GetParams(ctx).CrossMarginParams.EmergencyPaused && equityAdmAfter.LT(snapshot.OrderLockRequirement) {
+					return nil, cosmoserrors.Wrapf(
+						types.ErrInsufficientMargin,
+						"cross-margin admission check failed after position margin increase: equity_admission_after %s < order_lock_requirement %s",
+						equityAdmAfter.String(),
+						snapshot.OrderLockRequirement.String(),
+					)
+				}
+			}
+		}
+	}
+
 	chainFormatMarginIncrement, err := k.DecrementDepositOrChargeFromBank(ctx, sourceSubaccountID, market.QuoteDenom, chainFormatAmount)
 	if err != nil {
 		return nil, err
 	}
+
+	// Evict cross-pool snapshot cache for source: collateral has been debited.
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, sourceSubaccountID)
 
 	k.IncrementMarketBalance(ctx, marketID, chainFormatMarginIncrement)
 	marginIncrement := market.NotionalFromChainFormat(chainFormatMarginIncrement)
@@ -600,21 +679,76 @@ func (k DerivativesMsgServer) DecreasePositionMargin(
 
 	position.Margin = position.Margin.Sub(msg.Amount)
 
-	// check initial margin requirements
-	notional := position.EntryPrice.Mul(position.Quantity)
-
-	// Enforce that Margin ≥ ReduceMarginRatio * Price * Quantity
-	if position.Margin.LT(market.ReduceMarginRatio.Mul(notional)) {
-		return nil, types.ErrInsufficientMargin
+	// For cross-margin subaccounts, skip the per-position margin validation. In CM,
+	// position.Margin is accounting state and can be negative (e.g. after adverse funding) —
+	// pool-level equity covers the position. The pool-level maintenance/admission check
+	// below validates solvency. For isolated subaccounts, ValidateDerivativePositionMarginDecrease
+	// enforces Margin >= ReduceMarginRatio * Notional, which is strictly tighter than a sign check.
+	profile, _ := k.RiskEngine().EffectiveProfile(ctx, sourceSubaccountID)
+	isCross := profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS
+	if !isCross {
+		if err := k.RiskEngine().ValidateDerivativePositionMarginDecrease(ctx, sourceSubaccountID, position, market, markPrice); err != nil {
+			return nil, err
+		}
 	}
 
-	// For Longs: MarkPrice ≥ (Margin - Price * Quantity) / ((ReduceMarginRatio - 1) * Quantity)
-	// For Shorts: MarkPrice ≤ (Margin + Price * Quantity) / ((1 + ReduceMarginRatio) * Quantity)
-	markPriceThreshold := types.ComputeMarkPriceThreshold(
-		position.IsLong, position.EntryPrice, position.Quantity, position.Margin, market.ReduceMarginRatio,
-	)
-	if err := types.CheckInitialMarginMarkPriceRequirement(position.IsLong, markPriceThreshold, markPrice); err != nil {
-		return nil, err
+	// Cross margin: if the decreased margin leaves the subaccount's quote-denom pool,
+	// enforce portfolio-level maintenance and keep existing open orders admissible.
+	//
+	// For non-default subaccounts, a self-decrease (dest == source) keeps funds in exchange
+	// deposits, so net pool equity is unchanged and the check can be skipped.
+	// For default subaccounts, IncrementDepositOrSendToBank forwards the integer portion to
+	// bank, and bank balance is excluded from cross-margin QuoteBalance, so a self-decrease
+	// still reduces pool equity and the check must run.
+	needsCrossCheck := destinationSubaccountID != sourceSubaccountID || types.IsDefaultSubaccountID(sourceSubaccountID)
+	if profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS && needsCrossCheck {
+		snapshot, err := k.RiskEngine().BuildCrossPoolSnapshot(ctx, sourceSubaccountID, market.QuoteDenom, market.QuoteDecimals)
+		if err != nil {
+			return nil, err
+		}
+
+		// Compute the effective pool outflow. For a default-subaccount self-decrease,
+		// IncrementDepositOrSendToBank sweeps only the integer portion to bank; the
+		// fractional remainder stays in exchange deposits (part of pool QuoteBalance).
+		// The actual equity decrease is the bank-swept portion, not the full msg.Amount.
+		poolOutflow := msg.Amount
+		if destinationSubaccountID == sourceSubaccountID && types.IsDefaultSubaccountID(sourceSubaccountID) {
+			chainAmount := market.NotionalToChainFormat(msg.Amount)
+			deposit := k.GetDeposit(ctx, sourceSubaccountID, market.QuoteDenom)
+			newAvail := deposit.AvailableBalance.Add(chainAmount)
+			bankSweep := newAvail.TruncateInt()
+			if bankSweep.IsPositive() {
+				poolOutflow = types.NotionalFromChainFormat(bankSweep.ToLegacyDec(), market.QuoteDecimals)
+			} else {
+				poolOutflow = math.LegacyZeroDec()
+			}
+		}
+
+		equityLiqAfter := snapshot.EquityLiquidation.Sub(poolOutflow)
+		equityAdmAfter := snapshot.EquityAdmission.Sub(poolOutflow)
+
+		// Emergency pause: strip positive UPnL to enforce isolated-margin-level maintenance.
+		if params.CrossMarginParams.EmergencyPaused {
+			equityLiqAfter, equityAdmAfter = snapshot.StripPositiveUPnL(equityLiqAfter, equityAdmAfter)
+		}
+
+		if equityLiqAfter.LT(snapshot.MaintenanceMarginTotal) {
+			return nil, cosmoserrors.Wrapf(
+				types.ErrInsufficientMargin,
+				"cross-margin maintenance check failed after position margin decrease: equity_after %s < maintenance %s",
+				equityLiqAfter.String(),
+				snapshot.MaintenanceMarginTotal.String(),
+			)
+		}
+
+		if !params.CrossMarginParams.EmergencyPaused && equityAdmAfter.LT(snapshot.OrderLockRequirement) {
+			return nil, cosmoserrors.Wrapf(
+				types.ErrInsufficientMargin,
+				"cross-margin admission check failed after position margin decrease: equity_admission_after %s < order_lock_requirement %s",
+				equityAdmAfter.String(),
+				snapshot.OrderLockRequirement.String(),
+			)
+		}
 	}
 
 	marketBalance := k.GetMarketBalance(ctx, marketID)
@@ -626,6 +760,13 @@ func (k DerivativesMsgServer) DecreasePositionMargin(
 
 	k.SavePosition(ctx, marketID, sourceSubaccountID, position)
 	k.IncrementDepositOrSendToBank(ctx, destinationSubaccountID, market.QuoteDenom, chainFormatMarginDecrease)
+
+	// Evict destination cross-pool snapshot cache: collateral has been credited.
+	// Source is already evicted by SavePosition above.
+	if destinationSubaccountID != sourceSubaccountID {
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, destinationSubaccountID)
+	}
+
 	return &v2.MsgDecreasePositionMarginResponse{}, nil
 }
 

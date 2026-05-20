@@ -1,34 +1,16 @@
 package keeper
 
 import (
-	"context"
-	"fmt"
 	"sort"
 
 	"cosmossdk.io/math"
 	"cosmossdk.io/store/prefix"
-	"github.com/InjectiveLabs/metrics/v2"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/assistant/provider"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
-
-type ProviderKeeper interface {
-	IsProviderRelayer(ctx sdk.Context, provider string, relayer sdk.AccAddress) bool
-	GetProviderRelayers(ctx sdk.Context, provider string) []sdk.AccAddress
-	DeleteProviderRelayers(ctx sdk.Context, provider string, relayers []string) error
-	GetProviderInfo(ctx sdk.Context, provider string) *types.ProviderInfo
-	SetProviderInfo(ctx sdk.Context, providerInfo *types.ProviderInfo) error
-	GetAllProviderInfos(ctx sdk.Context) []*types.ProviderInfo
-	GetProviderPriceState(ctx sdk.Context, provider, symbol string) *types.ProviderPriceState
-	SetProviderPriceState(ctx sdk.Context, provider string, priceState *types.ProviderPriceState)
-	GetProviderPriceStates(ctx sdk.Context, provider string) []*types.ProviderPriceState
-	GetProviderPrice(ctx sdk.Context, provider, symbol string) *math.LegacyDec
-	GetCumulativeProviderPrice(ctx sdk.Context, provider, symbol string) *math.LegacyDec
-	GetAllProviderStates(ctx sdk.Context) []*types.ProviderState
-	ProcessProviderPrices(ctx sdk.Context, msg *types.MsgRelayProviderPrices)
-	Meter(context.Context) metrics.Meter
-}
 
 // IsProviderRelayer checks that the relayer has been authorized for the given provider.
 func (k *Keeper) IsProviderRelayer(ctx sdk.Context, provider string, relayer sdk.AccAddress) bool {
@@ -108,6 +90,10 @@ func (k *Keeper) GetProviderInfo(ctx sdk.Context, provider string) *types.Provid
 func (k *Keeper) SetProviderInfo(ctx sdk.Context, providerInfo *types.ProviderInfo) error {
 	defer k.Meter(ctx).FuncTiming(&ctx, "SetProviderInfo")()
 
+	if err := types.ValidateReservedProviderID(providerInfo.Provider); err != nil {
+		return err
+	}
+
 	bz := k.cdc.MustMarshal(providerInfo)
 
 	k.getStore(ctx).Set(types.GetProviderInfoKey(providerInfo.Provider), bz)
@@ -128,19 +114,15 @@ func (k *Keeper) SetProviderInfo(ctx sdk.Context, providerInfo *types.ProviderIn
 func (k *Keeper) GetAllProviderInfos(ctx sdk.Context) []*types.ProviderInfo {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetAllProviderInfos")()
 
-	store := k.getStore(ctx)
+	providerStore := prefix.NewStore(k.getStore(ctx), types.ProviderInfoPrefix)
 
-	providerStore := prefix.NewStore(store, types.ProviderInfoPrefix)
-
-	iterator := providerStore.Iterator(nil, nil)
-	defer iterator.Close()
-
-	providerInfos := make([]*types.ProviderInfo, 0)
-	for ; iterator.Valid(); iterator.Next() {
+	var providerInfos []*types.ProviderInfo
+	chaintypes.IterateSafe(providerStore.Iterator(nil, nil), func(_, v []byte) bool {
 		var p types.ProviderInfo
-		k.cdc.MustUnmarshal(iterator.Value(), &p)
+		k.cdc.MustUnmarshal(v, &p)
 		providerInfos = append(providerInfos, &p)
-	}
+		return false
+	})
 
 	return providerInfos
 }
@@ -181,10 +163,10 @@ func (k *Keeper) GetProviderPriceState(ctx sdk.Context, provider, symbol string)
 		return nil
 	}
 
-	var priceState types.ProviderPriceState
-	k.cdc.MustUnmarshal(bz, &priceState)
+	var state types.PriceState
+	k.cdc.MustUnmarshal(bz, &state)
 
-	return &priceState
+	return &types.ProviderPriceState{Symbol: symbol, State: &state}
 }
 
 func (k *Keeper) SetProviderPriceState(ctx sdk.Context, provider string, providerPriceState *types.ProviderPriceState) {
@@ -192,11 +174,11 @@ func (k *Keeper) SetProviderPriceState(ctx sdk.Context, provider string, provide
 
 	symbol := providerPriceState.Symbol
 	priceKey := types.GetProviderPriceKey(provider, symbol)
-	bz := k.cdc.MustMarshal(providerPriceState)
+	bz := k.cdc.MustMarshal(providerPriceState.State)
 	k.getStore(ctx).Set(priceKey, bz)
 
 	// a bit of a hack since provider only works for (provider, symbol) and not base/quote
-	pair := fmt.Sprintf("%s/%s", types.GetDelimitedProvider(provider), symbol)
+	pair := types.JoinProviderCompoundKey(provider, symbol)
 	k.AppendPriceRecord(ctx, types.OracleType_Provider, pair, &types.PriceRecord{
 		Timestamp: providerPriceState.State.Timestamp,
 		Price:     providerPriceState.State.Price,
@@ -206,19 +188,18 @@ func (k *Keeper) SetProviderPriceState(ctx sdk.Context, provider string, provide
 func (k *Keeper) GetProviderPriceStates(ctx sdk.Context, provider string) []*types.ProviderPriceState {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetProviderPriceStates")()
 
-	store := k.getStore(ctx)
+	priceStore := prefix.NewStore(k.getStore(ctx), types.GetProviderPricePrefix(provider))
 
-	priceStore := prefix.NewStore(store, types.GetProviderPricePrefix(provider))
-
-	iterator := priceStore.Iterator(nil, nil)
-	defer iterator.Close()
-
-	providerPriceStates := make([]*types.ProviderPriceState, 0)
-	for ; iterator.Valid(); iterator.Next() {
-		var p types.ProviderPriceState
-		k.cdc.MustUnmarshal(iterator.Value(), &p)
-		providerPriceStates = append(providerPriceStates, &p)
-	}
+	var providerPriceStates []*types.ProviderPriceState
+	chaintypes.IterateSafe(priceStore.Iterator(nil, nil), func(key, val []byte) bool {
+		var state types.PriceState
+		k.cdc.MustUnmarshal(val, &state)
+		providerPriceStates = append(providerPriceStates, &types.ProviderPriceState{
+			Symbol: string(key),
+			State:  &state,
+		})
+		return false
+	})
 
 	return providerPriceStates
 }
@@ -263,31 +244,5 @@ func (k *Keeper) GetAllProviderStates(ctx sdk.Context) []*types.ProviderState {
 func (k *Keeper) ProcessProviderPrices(ctx sdk.Context, msg *types.MsgRelayProviderPrices) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "ProcessProviderPrices")()
 
-	for idx := range msg.Prices {
-		price := msg.Prices[idx]
-		symbol := msg.Symbols[idx]
-
-		providerPriceState := k.GetProviderPriceState(ctx, msg.Provider, symbol)
-
-		blockTime := ctx.BlockTime().Unix()
-		if providerPriceState == nil || providerPriceState.State == nil {
-			providerPriceState = types.NewProviderPriceState(symbol, price, blockTime)
-		} else {
-			// skip price update if the price changes beyond 100x or less than 1% of the last price
-			if types.CheckPriceFeedThreshold(providerPriceState.State.Price, price) {
-				continue
-			}
-			providerPriceState.State.UpdatePrice(price, blockTime)
-		}
-
-		k.SetProviderPriceState(ctx, msg.Provider, providerPriceState)
-
-		// nolint:errcheck //ignored on purpose
-		ctx.EventManager().EmitTypedEvent(&types.SetProviderPriceEvent{
-			Provider: msg.Provider,
-			Relayer:  msg.Sender,
-			Symbol:   symbol,
-			Price:    price,
-		})
-	}
+	provider.NewAssistant(k).ProcessProviderPrices(ctx, msg)
 }

@@ -9,7 +9,7 @@ This doc lists all the data Peggy module reads/writes to its state as KV pairs
 
 ### Module Params
 
-Params is a module-wide configuration structure that stores parameters and defines overall functioning of the peggy module. Detailed specification for each parameter can be found in the [Parameters section](08_params.md). 
+Params is a module-wide configuration structure that stores parameters and defines overall functioning of the Peggy module. Detailed specification for each parameter can be found in the [Parameters section](08_params.md).
 
 | key           | Value         | Type           | Encoding         |
 |---------------|---------------|----------------|------------------|
@@ -65,9 +65,9 @@ type Valset struct {
 |--------------------------------------------|---------------|----------------|------------------|
 | `[]byte{0x2} + nonce (big endian encoded)` | Validator set | `types.Valset` | Protobuf encoded |
 
-### SlashedValsetNonce
+### LastJailedValsetNonce
 
-The latest validator set slash nonce. This is used to track which validator set needs to be slashed and which already has been.
+The latest valset nonce processed by Peggy's valset-jailing logic. This is used to track which valsets have already been checked for missed confirmations.
 
 | Key            | Value | Type   | Encoding               |
 |----------------|-------|--------|------------------------|
@@ -84,7 +84,7 @@ Nonce of the latest validator set. Updated on each new validator set.
 
 ### Valset Confirmation
 
-`Singer` confirmation for a particular validator set. See [oracle messages](./04_messages.md#ValsetConfirm)
+`Signer` confirmation for a particular validator set. See [oracle messages](./04_messages.md#ValsetConfirm)
 
 | Key                                         | Value                  | Type                     | Encoding         |
 |---------------------------------------------|------------------------|--------------------------|------------------|
@@ -92,7 +92,7 @@ Nonce of the latest validator set. Updated on each new validator set.
 
 ### Batch Confirmation
 
-`Singer` confirmation for a particular token batch. See [oracle messages](./04_messages.md#ConfirmBatch)
+`Signer` confirmation for a particular token batch. See [oracle messages](./04_messages.md#ConfirmBatch)
 
 | Key                                                                 | Value                        | Type                    | Encoding         |
 |---------------------------------------------------------------------|------------------------------|-------------------------|------------------|
@@ -160,17 +160,17 @@ Monotonically increasing value for each batch created on Injective by some `Batc
 |---------------------------------------|--------------------|----------|--------------------|
 | `[]byte{0x7} + []byte("lastBatchId")` | Last used batch ID | `uint64` | Big endian encoded |
 
-### SlashedBlockHeight
+### LastJailedBatchBlock
 
-Represents the latest slashed block height. There is always only a singe value stored. 
+Represents the latest batch block height processed by Peggy's batch-jailing logic. There is always only a single value stored.
 
 | Key            | Value                                   | Type     | Encoding           |
 |----------------|-----------------------------------------|----------|--------------------|
-| `[]byte{0xf7}` | Latest height a batch slashing occurred | `uint64` | Big endian encoded |
+| `[]byte{0xf7}` | Latest height a batch jailing pass covered | `uint64` | Big endian encoded |
 
 ### LastUnbondingBlockHeight
 
-Represents the latest bloch height at which a `Validator` started unbonding from the `Validator Set`. Used to determine slashing conditions.
+Represents the latest block height at which a `Validator` started unbonding from the `Validator Set`. Peggy uses this to trigger creation of a fresh valset request when a validator starts unbonding.
 
 | Key            | Value                                                | Type     | Encoding           |
 |----------------|------------------------------------------------------|----------|--------------------|
@@ -262,4 +262,3 @@ A list of known malicious Ethereum addresses that are prevented from using the b
 | Key                                       | Value              | Type              | Encoding               |
 |-------------------------------------------|--------------------|-------------------|------------------------|
 | `[]byte{0x1c} + []byte(ethereum address)` | Empty []byte slice | `gethcommon.Hash` | stored in byte format] |
-

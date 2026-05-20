@@ -14,7 +14,6 @@ import (
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/ethereum/go-ethereum/common"
 
-	oracletypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
 )
 
@@ -300,10 +299,6 @@ func (k msgServer) ConfirmBatch(c context.Context, msg *types.MsgConfirmBatch) (
 	return nil, nil
 }
 
-// DepositClaim handles MsgDepositClaim
-// TODO it is possible to submit an old msgDepositClaim (old defined as covering an event nonce that has already been
-// executed aka 'observed' and had it's slashing window expire) that will never be cleaned up in the endblocker. This
-// should not be a security risk as 'old' events can never execute but it does store spam in the chain.
 func (k msgServer) DepositClaim(c context.Context, msg *types.MsgDepositClaim) (*types.MsgDepositClaimResponse, error) {
 	ctx := sdk.UnwrapSDKContext(c)
 	defer k.Meter(ctx).FuncTiming(&ctx, "DepositClaim")()
@@ -348,7 +343,7 @@ func (k msgServer) DepositClaim(c context.Context, msg *types.MsgDepositClaim) (
 
 // WithdrawClaim handles MsgWithdrawClaim
 // TODO it is possible to submit an old msgWithdrawClaim (old defined as covering an event nonce that has already been
-// executed aka 'observed' and had it's slashing window expire) that will never be cleaned up in the endblocker. This
+// executed aka 'observed' and had its signed claims window expire) that will never be cleaned up in the endblocker. This
 // should not be a security risk as 'old' events can never execute but it does store spam in the chain.
 func (k msgServer) WithdrawClaim(c context.Context, msg *types.MsgWithdrawClaim) (*types.MsgWithdrawClaimResponse, error) {
 	ctx := sdk.UnwrapSDKContext(c)
@@ -619,7 +614,8 @@ func (k msgServer) UpdateRateLimit(
 		return nil, errors.Wrapf(types.ErrUnknown, "no rate limit found for %s", msg.TokenAddress)
 	}
 
-	if price := k.OracleKeeper.GetPythPrice(ctx, msg.NewTokenPriceId, oracletypes.QuoteUSD); price == nil || price.IsZero() {
+	priceState := k.OracleKeeper.GetPythPriceState(ctx, common.HexToHash(msg.NewTokenPriceId))
+	if priceState == nil || priceState.PriceState.Price.IsNil() || !priceState.PriceState.Price.IsPositive() {
 		return nil, errors.Wrapf(types.ErrInvalid, "got invalid price for oracle id: %s", msg.NewTokenPriceId)
 	}
 

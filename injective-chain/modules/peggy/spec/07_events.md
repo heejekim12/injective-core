@@ -5,7 +5,7 @@ title: Events
 
 # Events
 
-The peggy module emits the following events:
+The Peggy module emits the following events:
 
 ## EndBlocker
 
@@ -18,17 +18,23 @@ The peggy module emits the following events:
 | []byte | attestation_id   | {attestation_id}          |
 | uint64 | nonce            | {event_nonce}             |
 
-### EventValidatorSlash
-| Type   | Attribute Key     | Attribute Value       |
-|--------|-------------------|-----------------------|
-| string | reason            | {reason_for_slashing} |
-| int64  | power             | {validator_power}     |
-| string | consensus_address | {consensus_addr}      |
-| string | operator_address  | {operator_addr}       |
-| string | moniker           | {validator_moniker}   |
+### EventValidatorJailed
+| Type    | Attribute Key       | Attribute Value                                   |
+|---------|---------------------|---------------------------------------------------|
+| enum    | reason              | `MissingValsetConfirm` or `MissingBatchConfirm`   |
+| int64   | power               | {validator_power}                                 |
+| string  | consensus_address   | {consensus_addr}                                  |
+| string  | operator_address    | {operator_addr}                                   |
+| string  | moniker             | {validator_moniker}                               |
 
   
 ## Handler
+
+### EventSubmitBadSignatureEvidence
+| Type   | Attribute Key             | Attribute Value              |
+|--------|---------------------------|------------------------------|
+| string | bad_eth_signature         | {bad_eth_signature}          |
+| string | bad_eth_signature_subject | {bad_eth_signature_subject}  |
 
 ### EventSetOrchestratorAddresses
 
@@ -79,7 +85,7 @@ The peggy module emits the following events:
 | Type   | Attribute Key        | Attribute Value |
 |--------|----------------------|-----------------|
 | uint64 | valset_nonce         | {nonce}         |
-| string | orchestrator_address | {prch_addr}     |
+| string | orchestrator_address | {orch_addr}     |
 
 
 ### EventConfirmBatch
@@ -88,6 +94,8 @@ The peggy module emits the following events:
 |--------|----------------------|-----------------|
 | uint64 | batch_nonce          | {nonce}         |
 | string | orchestrator_address | {orch_addr}     |
+
+> Note: `EventValidatorSlash` still exists in the protobuf definitions, but the current Peggy module code does not emit it.
 
 ### EventDepositClaim
 
@@ -108,7 +116,7 @@ The peggy module emits the following events:
 
 | Type   | Attribute Key        | Attribute Value   |
 |--------|----------------------|-------------------|
-| uint64 | event_nonce          | {event_nonce{     |
+| uint64 | event_nonce          | {event_nonce}     |
 | uint64 | event_height         | {event_height}    |
 | []byte | attestation_id       | {attestation_key} |
 | uint64 | batch_nonce          | {batch_nonce}     |
@@ -122,7 +130,7 @@ The peggy module emits the following events:
 | uint64 | event_height         | {event_height}         |
 | []byte | attestation_id       | {attestation_key}      |
 | string | cosmos_denom         | {token_denom}          |
-| string | token_contract       | {token_conntract_addr} |
+| string | token_contract       | {token_contract_addr}  |
 | string | name                 | {token_name}           |
 | string | symbol               | {token_symbol}         |
 | uint64 | decimals             | {token_decimals}       |
@@ -139,5 +147,3 @@ The peggy module emits the following events:
 | sdk.Int            | reward_amount        | {amount}              |
 | string             | reward_token         | {contract_addr}       |
 | string             | orchestrator_address | {orch_addr}           |
-
-

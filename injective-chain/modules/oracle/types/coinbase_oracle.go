@@ -1,19 +1,16 @@
 package types
 
 import (
-	"bytes"
 	"strings"
 
-	"cosmossdk.io/errors"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
-const (
-	CoinbaseOraclePublicKey = "0xfCEAdAFab14d46e20144F48824d0C09B1a03F2BC"
-	preamblePrefix          = "\x19Ethereum Signed Message:\n32"
-)
+const CoinbaseOraclePublicKey = "0xfCEAdAFab14d46e20144F48824d0C09B1a03F2BC"
 
 const CoinbaseABIJSON = `[{
 	"name": "coinbase",
@@ -30,7 +27,7 @@ const CoinbaseABIJSON = `[{
 
 func ValidateCoinbaseSignature(message, signature []byte) error {
 	hash := crypto.Keccak256Hash(message)
-	return ValidateEthereumSignature(hash, signature, common.HexToAddress(CoinbaseOraclePublicKey))
+	return chaintypes.ValidateEthereumSignature(hash, signature, common.HexToAddress(CoinbaseOraclePublicKey))
 }
 
 func ParseCoinbaseMessage(message []byte) (*CoinbasePriceState, error) {
@@ -61,55 +58,4 @@ func ParseCoinbaseMessage(message []byte) (*CoinbasePriceState, error) {
 	}
 
 	return &priceState, nil
-}
-
-// ValidateEthereumSignature takes a message, an associated signature and public key and
-// returns an error if the signature isn't valid
-// TODO: refactor to shared common dir, copy pasted below code from Peggy
-func ValidateEthereumSignature(hash common.Hash, signature []byte, ethAddress common.Address) error {
-	var trimmedSig []byte
-
-	// Coinbase responses may contain a malformed 96-byte signature where
-	// the recovery id is stored at byte 95. Normalize to canonical 65-byte format.
-	switch len(signature) {
-	case 65:
-		trimmedSig = make([]byte, 65)
-		copy(trimmedSig, signature)
-	case 96:
-		trimmedSig = make([]byte, 65)
-		copy(trimmedSig, signature[:65])
-		trimmedSig[64] = signature[95]
-	default:
-		if len(signature) < 65 {
-			return errors.Wrap(ErrInvalidEthereumSignature, "signature too short")
-		}
-		return errors.Wrapf(ErrInvalidEthereumSignature, "unexpected signature length: %d", len(signature))
-	}
-
-	// calculate recover id
-	if trimmedSig[64] == 27 || trimmedSig[64] == 28 {
-		trimmedSig[64] -= 27
-	}
-
-	if trimmedSig[64] != 0 && trimmedSig[64] != 1 {
-		return errors.Wrapf(ErrInvalidEthereumSignature, "invalid recovery id: %d", trimmedSig[64])
-	}
-
-	// manually build the hash with ethereum prefix
-	preamblePrefix := []byte(preamblePrefix)
-	preambleMessage := append(preamblePrefix, hash.Bytes()...) // nolint:gocritic
-	preambleHash := crypto.Keccak256Hash(preambleMessage)
-
-	// verify signature
-	pubkey, err := crypto.SigToPub(preambleHash.Bytes(), trimmedSig)
-	if err != nil {
-		return errors.Wrap(err, "signature to public key")
-	}
-	addr := crypto.PubkeyToAddress(*pubkey)
-
-	if !bytes.Equal(addr.Bytes(), ethAddress.Bytes()) {
-		return errors.Wrapf(ErrInvalidEthereumSignature, "signature not matching, expected %s but got %s", ethAddress.Hex(), addr.Hex())
-	}
-
-	return nil
 }

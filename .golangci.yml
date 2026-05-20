@@ -14,7 +14,6 @@ linters:
     gocritic:
       disabled-checks:
         - singleCaseSwitch
-        - deferInLoop
         - hugeParam
         - unnamedResult
       enabled-tags:
@@ -30,6 +29,8 @@ linters:
           arguments:
             - - ID
         - name: add-constant
+          disabled: true
+        - name: max-public-structs
           disabled: true
         - name: line-length-limit
           arguments:
@@ -51,10 +52,13 @@ linters:
       - linters:
           - revive
         text: ALL_CAPS
+      - path: '(^|/)types/.*\.go$'
+        linters:
+          - revive
+        text: 'package-naming: .*"types"'
     paths:
       - scripts/align_deps.go
       - injective-chain/modules/peggy/testpeggy
-      - injective-chain/modules/exchange/testexchange
       - injective-chain/modules/exchange/client/testutil
       - injective-chain/stream/test
       - third_party$
@@ -63,6 +67,8 @@ linters:
 issues:
   max-issues-per-linter: 0
 formatters:
+  enable:
+    - gofmt
   exclusions:
     generated: lax
     paths:

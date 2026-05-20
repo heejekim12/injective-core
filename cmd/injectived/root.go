@@ -14,10 +14,9 @@ import (
 	snapshottypes "cosmossdk.io/store/snapshots/types"
 	storetypes "cosmossdk.io/store/types"
 	confixcmd "cosmossdk.io/tools/confix/cmd"
-	"github.com/CosmWasm/wasmd/x/wasm"
+	txsigning "cosmossdk.io/x/tx/signing"
 	wasmcli "github.com/CosmWasm/wasmd/x/wasm/client/cli"
 	tmcmd "github.com/cometbft/cometbft/cmd/cometbft/commands"
-	tmcfg "github.com/cometbft/cometbft/config"
 	cmcli "github.com/cometbft/cometbft/libs/cli"
 	dbm "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/cosmos-sdk/baseapp"
@@ -31,7 +30,6 @@ import (
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdkserver "github.com/cosmos/cosmos-sdk/server"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
-	simtestutil "github.com/cosmos/cosmos-sdk/testutil/sims"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
@@ -40,19 +38,19 @@ import (
 	authtxconfig "github.com/cosmos/cosmos-sdk/x/auth/tx/config"
 	"github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	"github.com/cosmos/cosmos-sdk/x/crisis"
 	"github.com/cosmos/cosmos-sdk/x/genutil"
 	genutilcli "github.com/cosmos/cosmos-sdk/x/genutil/client/cli"
 	genutiltypes "github.com/cosmos/cosmos-sdk/x/genutil/types"
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog"
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	clientcli "github.com/InjectiveLabs/injective-core/cmd/injectived/config/cli"
 	"github.com/InjectiveLabs/injective-core/injective-chain/app"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/ante/eip712"
 	"github.com/InjectiveLabs/injective-core/injective-chain/app/ante/typeddata"
+	appconfig "github.com/InjectiveLabs/injective-core/injective-chain/app/config"
+	clientcli "github.com/InjectiveLabs/injective-core/injective-chain/app/config/cli"
 	chainclient "github.com/InjectiveLabs/injective-core/injective-chain/client"
 	injcodectypes "github.com/InjectiveLabs/injective-core/injective-chain/codec/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/crypto/hd"
@@ -65,7 +63,10 @@ import (
 func NewRootCmd() *cobra.Command {
 	// we "pre"-instantiate the application for getting the injected/configured encoding configuration
 	// note, this is not necessary when using app wiring, as depinject can be directly used (see root_v2.go)
-	tempApp := app.NewInjectiveApp(log.NewNopLogger(), dbm.NewMemDB(), nil, true, simtestutil.NewAppOptionsWithFlagHome(tempDir()))
+	cfg := appconfig.DefaultConfig()
+	defaultHome := cfg.GetHome()
+	cfg.Set(flags.FlagHome, tempDir())
+	tempApp := app.NewInjectiveApp(log.NewNopLogger(), dbm.NewMemDB(), nil, true, *cfg)
 	encodingConfig := injcodectypes.EncodingConfig{
 		InterfaceRegistry: tempApp.InterfaceRegistry(),
 		Codec:             tempApp.AppCodec(),
@@ -85,7 +86,7 @@ func NewRootCmd() *cobra.Command {
 		WithKeyringOptions(hd.EthSecp256k1Option()).
 		WithAccountRetriever(types.AccountRetriever{}).
 		WithBroadcastMode(flags.BroadcastSync).
-		WithHomeDir(app.DefaultNodeHome).
+		WithHomeDir(defaultHome).
 		WithViper("injectived").
 		WithKeyringOptions(injectivekr.EthSecp256k1Option()).
 		WithPreprocessTxHook(injectivekr.LedgerPreprocessTxHook)
@@ -117,6 +118,7 @@ func NewRootCmd() *cobra.Command {
 			if !initClientCtx.Offline {
 				txConfigOpts := tx.ConfigOptions{
 					EnabledSignModes:           append(tx.DefaultSignModes, signing.SignMode_SIGN_MODE_TEXTUAL),
+					CustomSignModes:            []txsigning.SignModeHandler{eip712.NewSignModeHandler(initClientCtx.Codec)},
 					TextualCoinMetadataQueryFn: authtxconfig.NewGRPCCoinMetadataQueryFn(initClientCtx),
 				}
 
@@ -161,11 +163,9 @@ func Execute(rootCmd *cobra.Command) error {
 	ctx = context.WithValue(ctx, client.ClientContextKey, &client.Context{})
 	ctx = context.WithValue(ctx, sdkserver.ServerContextKey, sdkserver.NewDefaultContext())
 
-	rootCmd.PersistentFlags().String("log-level", zerolog.InfoLevel.String(), "The logging level (trace|debug|info|warn|error|fatal|panic)")
-	rootCmd.PersistentFlags().String("log-format", tmcfg.LogFormatPlain, "The logging format (json|plain)")
-	rootCmd.PersistentFlags().Bool("log-color", true, "Enable log output coloring")
+	appconfig.AddLogFlags(rootCmd)
 
-	executor := cmcli.PrepareBaseCmd(rootCmd, "", app.DefaultNodeHome)
+	executor := cmcli.PrepareBaseCmd(rootCmd, "", appconfig.DefaultNodeHome)
 	return executor.ExecuteContext(ctx)
 }
 
@@ -181,12 +181,12 @@ func initRootCmd(
 	cfg.Seal()
 
 	rootCmd.AddCommand(
-		genutilcli.InitCmd(basicManager, app.DefaultNodeHome),
+		genutilcli.InitCmd(basicManager, appconfig.DefaultNodeHome),
 		debug.Cmd(),
 		confixcmd.ConfigCommand(),
-		pruning.Cmd(newApp, app.DefaultNodeHome),
+		pruning.Cmd(newApp, appconfig.DefaultNodeHome),
 		snapshot.Cmd(newApp),
-		AddGenesisAccountCmd(app.DefaultNodeHome),
+		AddGenesisAccountCmd(appconfig.DefaultNodeHome),
 	)
 
 	cometCmd := &cobra.Command{
@@ -205,17 +205,14 @@ func initRootCmd(
 		sdkserver.BootstrapStateCmd(newApp),
 	)
 
-	startCmd := StartCmd(newApp, app.DefaultNodeHome)
-
-	AddModuleInitFlags(startCmd)
-	AddStatsdFlagsToCmd(startCmd)
+	startCmd := StartCmd(newInjApp)
 
 	rootCmd.AddCommand(
 		startCmd,
 		cometCmd,
-		sdkserver.ExportCmd(appExport, app.DefaultNodeHome),
+		sdkserver.ExportCmd(appExport, appconfig.DefaultNodeHome),
 		version.NewVersionCommand(),
-		sdkserver.NewRollbackCmd(newApp, app.DefaultNodeHome),
+		sdkserver.NewRollbackCmd(newApp, appconfig.DefaultNodeHome),
 	)
 
 	rootCmd.AddCommand(devnetifyCmd(app.NewDevnetApp))
@@ -228,13 +225,8 @@ func initRootCmd(
 		genesisCommand(txConfig, basicManager),
 		queryCommand(),
 		txCommand(),
-		chainclient.KeyCommands(app.DefaultNodeHome),
+		chainclient.KeyCommands(appconfig.DefaultNodeHome),
 	)
-}
-
-func AddModuleInitFlags(startCmd *cobra.Command) {
-	crisis.AddModuleInitFlags(startCmd)
-	wasm.AddModuleInitFlags(startCmd)
 }
 
 // genesisCommand builds genesis-related `simd genesis` command. Users may provide application specific commands as a parameter
@@ -249,12 +241,12 @@ func genesisCommand(txConfig client.TxConfig, basicManager module.BasicManager, 
 	gentxModule := basicManager[genutiltypes.ModuleName].(genutil.AppModuleBasic)
 
 	cmd.AddCommand(
-		genutilcli.InitCmd(basicManager, app.DefaultNodeHome),
-		genutilcli.CollectGenTxsCmd(banktypes.GenesisBalancesIterator{}, app.DefaultNodeHome, gentxModule.GenTxValidator, txConfig.SigningContext().ValidatorAddressCodec()),
+		genutilcli.InitCmd(basicManager, appconfig.DefaultNodeHome),
+		genutilcli.CollectGenTxsCmd(banktypes.GenesisBalancesIterator{}, appconfig.DefaultNodeHome, gentxModule.GenTxValidator, txConfig.SigningContext().ValidatorAddressCodec()),
 		genutilcli.MigrateGenesisCmd(genutilcli.MigrationMap),
-		genutilcli.GenTxCmd(app.ModuleBasics, txConfig, banktypes.GenesisBalancesIterator{}, app.DefaultNodeHome, txConfig.SigningContext().ValidatorAddressCodec()),
+		genutilcli.GenTxCmd(app.ModuleBasics, txConfig, banktypes.GenesisBalancesIterator{}, appconfig.DefaultNodeHome, txConfig.SigningContext().ValidatorAddressCodec()),
 		genutilcli.ValidateGenesisCmd(app.ModuleBasics),
-		AddGenesisAccountCmd(app.DefaultNodeHome),
+		AddGenesisAccountCmd(appconfig.DefaultNodeHome),
 	)
 
 	for _, subCmd := range cmds {
@@ -286,7 +278,7 @@ func queryCommand() *cobra.Command {
 		authcmd.GetSimulateCmd(),
 	)
 
-	cmd.PersistentFlags().String(flags.FlagChainID, "", "The network chain ID")
+	appconfig.AddChainIDFlag(cmd)
 
 	return cmd
 }
@@ -314,31 +306,45 @@ func txCommand() *cobra.Command {
 		flags.LineBreak,
 	)
 
-	cmd.PersistentFlags().String(flags.FlagChainID, "", "The network chain ID")
+	appconfig.AddChainIDFlag(cmd)
 
 	return cmd
 }
 
-// newApp is an AppCreator
+// newApp is an AppCreator, here for compatibility with SDK commands
 func newApp(logger log.Logger, db dbm.DB, traceStore io.Writer, appOpts servertypes.AppOptions) servertypes.Application {
+	cfg, err := appconfig.GetConfig(appOpts.(*viper.Viper))
+	if err != nil {
+		panic(err)
+	}
+	return newInjApp(logger, db, traceStore, cfg)
+}
+
+// newInjApp is an InjAppCreator
+//
+//nolint:revive // cyclo complexity is OK
+func newInjApp(logger log.Logger, db dbm.DB, traceStore io.Writer, cfg appconfig.Config) servertypes.Application {
+	homeDir := cfg.GetHome()
+	chainID := cfg.GetChainID()
+
 	var cache storetypes.MultiStorePersistentCache
 
-	if cast.ToBool(appOpts.Get(sdkserver.FlagInterBlockCache)) {
+	if cfg.InterBlockCache {
 		cache = store.NewCommitKVStoreCacheManager()
 	}
 
 	skipUpgradeHeights := make(map[int64]bool)
-	for _, h := range cast.ToIntSlice(appOpts.Get(sdkserver.FlagUnsafeSkipUpgrades)) {
+	for _, h := range cast.ToIntSlice(cfg.Get(sdkserver.FlagUnsafeSkipUpgrades)) {
 		skipUpgradeHeights[int64(h)] = true
 	}
 
-	pruningOpts, err := sdkserver.GetPruningOptionsFromFlags(appOpts)
+	pruningOpts, err := cfg.GetPruningOptions()
 	if err != nil {
 		panic(err)
 	}
 
-	snapshotDir := filepath.Join(cast.ToString(appOpts.Get(flags.FlagHome)), "data", "snapshots")
-	snapshotDB, err := dbm.NewDB("metadata", sdkserver.GetAppDBBackend(appOpts), snapshotDir)
+	snapshotDir := filepath.Join(homeDir, "data", "snapshots")
+	snapshotDB, err := dbm.NewDB("metadata", cfg.GetDBBackend(), snapshotDir)
 	if err != nil {
 		panic(err)
 	}
@@ -347,14 +353,9 @@ func newApp(logger log.Logger, db dbm.DB, traceStore io.Writer, appOpts serverty
 		panic(err)
 	}
 
-	snapshotOptions := snapshottypes.NewSnapshotOptions(
-		cast.ToUint64(appOpts.Get(sdkserver.FlagStateSyncSnapshotInterval)),
-		cast.ToUint32(appOpts.Get(sdkserver.FlagStateSyncSnapshotKeepRecent)),
-	)
+	snapshotOptions := snapshottypes.NewSnapshotOptions(cfg.StateSync.SnapshotInterval, cfg.StateSync.SnapshotKeepRecent)
 
-	homeDir := cast.ToString(appOpts.Get(flags.FlagHome))
-	chainID := cast.ToString(appOpts.Get(flags.FlagChainID))
-	if chainID == "" {
+	if chainID == "" || chainID == appconfig.DefaultChainID {
 		// fallback to genesis chain-id
 		appGenesis, err := genutiltypes.AppGenesisFromFile(filepath.Join(homeDir, "config", "genesis.json"))
 		if err != nil {
@@ -366,21 +367,21 @@ func newApp(logger log.Logger, db dbm.DB, traceStore io.Writer, appOpts serverty
 
 	baseAppOptions := []func(*baseapp.BaseApp){
 		baseapp.SetPruning(pruningOpts),
-		baseapp.SetMinGasPrices(cast.ToString(appOpts.Get(sdkserver.FlagMinGasPrices))),
-		baseapp.SetHaltHeight(cast.ToUint64(appOpts.Get(sdkserver.FlagHaltHeight))),
-		baseapp.SetHaltTime(cast.ToUint64(appOpts.Get(sdkserver.FlagHaltTime))),
-		baseapp.SetMinRetainBlocks(cast.ToUint64(appOpts.Get(sdkserver.FlagMinRetainBlocks))),
+		baseapp.SetMinGasPrices(cfg.MinGasPrices),
+		baseapp.SetHaltHeight(cfg.HaltHeight),
+		baseapp.SetHaltTime(cfg.HaltTime),
+		baseapp.SetMinRetainBlocks(cfg.MinRetainBlocks),
 		baseapp.SetInterBlockCache(cache),
-		baseapp.SetTrace(cast.ToBool(appOpts.Get(sdkserver.FlagTrace))),
-		baseapp.SetIndexEvents(cast.ToStringSlice(appOpts.Get(sdkserver.FlagIndexEvents))),
+		baseapp.SetTrace(cast.ToBool(cfg.Get(sdkserver.FlagTrace))),
+		baseapp.SetIndexEvents(cfg.IndexEvents),
 		baseapp.SetSnapshot(snapshotStore, snapshotOptions),
-		baseapp.SetIAVLCacheSize(cast.ToInt(appOpts.Get(FlagIAVLCacheSize))),
-		baseapp.SetIAVLDisableFastNode(cast.ToBool(appOpts.Get(sdkserver.FlagDisableIAVLFastNode))),
-		baseapp.SetIAVLSyncPruning(cast.ToBool(appOpts.Get(sdkserver.FlagIAVLSyncPruning))),
+		baseapp.SetIAVLCacheSize(int(cfg.IAVLCacheSize)),
+		baseapp.SetIAVLDisableFastNode(cfg.IAVLDisableFastNode),
+		baseapp.SetIAVLSyncPruning(cast.ToBool(cfg.Get(sdkserver.FlagIAVLSyncPruning))),
 		baseapp.SetChainID(chainID),
 	}
 
-	if option := appOpts.Get(FlagOptimisticExecutionEnabled); option != nil {
+	if option := cfg.Get(appconfig.FlagOptimisticExecutionEnabled); option != nil {
 		if isEnabled, err := cast.ToBoolE(option); err == nil && isEnabled {
 			logger.Info("Optimistic execution enabled", isEnabled)
 			baseAppOptions = append(baseAppOptions, baseapp.SetOptimisticExecution())
@@ -391,7 +392,7 @@ func newApp(logger log.Logger, db dbm.DB, traceStore io.Writer, appOpts serverty
 
 	return app.NewInjectiveApp(
 		logger, db, traceStore, true,
-		appOpts,
+		cfg,
 		baseAppOptions...,
 	)
 }
@@ -425,14 +426,19 @@ func appExport(
 	viperAppOpts.Set(sdkserver.FlagInvCheckPeriod, 1)
 	appOpts = viperAppOpts
 
+	cfg, err := appconfig.GetConfig(viperAppOpts)
+	if err != nil {
+		return servertypes.ExportedApp{}, err
+	}
+
 	if height != -1 {
-		injectiveApp = app.NewInjectiveApp(logger, db, traceStore, false, appOpts)
+		injectiveApp = app.NewInjectiveApp(logger, db, traceStore, false, cfg)
 
 		if err := injectiveApp.LoadHeight(height); err != nil {
 			return servertypes.ExportedApp{}, err
 		}
 	} else {
-		injectiveApp = app.NewInjectiveApp(logger, db, traceStore, true, appOpts)
+		injectiveApp = app.NewInjectiveApp(logger, db, traceStore, true, cfg)
 	}
 
 	return injectiveApp.ExportAppStateAndValidators(forZeroHeight, jailAllowedAddrs, modulesToExport)
@@ -441,7 +447,7 @@ func appExport(
 var tempDir = func() string {
 	dir, err := os.MkdirTemp("", "injectiveapp")
 	if err != nil {
-		dir = app.DefaultNodeHome
+		dir = appconfig.DefaultNodeHome
 	}
 	defer os.RemoveAll(dir)
 

@@ -8,6 +8,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
 func (k *Keeper) GetCosmosOriginatedDenom(ctx sdk.Context, tokenContract common.Address) (string, bool) {
@@ -159,18 +160,11 @@ func (k *Keeper) ERC20ToDenomLookup(ctx sdk.Context, tokenContract common.Addres
 func (k *Keeper) IterateERC20ToDenom(ctx sdk.Context, cb func(k []byte, v *types.ERC20ToDenom) (stop bool)) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "IterateERC20ToDenom")()
 
-	prefixStore := prefix.NewStore(ctx.KVStore(k.storeKey), types.ERC20ToDenomKey)
-	iter := prefixStore.Iterator(nil, nil)
-	defer iter.Close()
-
-	for ; iter.Valid(); iter.Next() {
-		erc20ToDenom := types.ERC20ToDenom{
-			Erc20: common.BytesToAddress(iter.Key()).Hex(),
-			Denom: string(iter.Value()),
-		}
-
-		if cb(iter.Key(), &erc20ToDenom) {
-			break
-		}
-	}
+	erc20ToDenomStore := prefix.NewStore(k.getStore(ctx), types.ERC20ToDenomKey)
+	chaintypes.IterateSafe(erc20ToDenomStore.Iterator(nil, nil), func(key, value []byte) (stop bool) {
+		return cb(key, &types.ERC20ToDenom{
+			Erc20: common.BytesToAddress(key).Hex(),
+			Denom: string(value),
+		})
+	})
 }

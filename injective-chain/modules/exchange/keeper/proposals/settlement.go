@@ -33,7 +33,7 @@ func (k *ProposalKeeper) HandleMarketForcedSettlementProposal(ctx sdk.Context, p
 		return scheduleSpotMarketForceClosure(ctx, k, spotMarket)
 	}
 
-	return scheduleDerivativeMarketSettlement(ctx, k, derivativeMarket, p.SettlementPrice)
+	return scheduleDerivativeMarketForceSettlement(ctx, k, derivativeMarket, p.SettlementPrice)
 }
 
 func scheduleSpotMarketForceClosure(
@@ -53,13 +53,13 @@ func scheduleSpotMarketForceClosure(
 	return nil
 }
 
-func scheduleDerivativeMarketSettlement(
+func scheduleDerivativeMarketForceSettlement(
 	ctx sdk.Context,
 	k *ProposalKeeper,
 	derivativeMarket *v2.DerivativeMarket,
 	settlementPrice *math.LegacyDec,
 ) error {
-	defer k.Meter(ctx).FuncTiming(&ctx, "scheduleDerivativeMarketSettlement")()
+	defer k.Meter(ctx).FuncTiming(&ctx, "scheduleDerivativeMarketForceSettlement")()
 
 	if settlementPrice == nil {
 		// zero is a reserved value for fetching the latest price from oracle
@@ -75,8 +75,9 @@ func scheduleDerivativeMarketSettlement(
 	}
 
 	k.SetDerivativesMarketScheduledSettlementInfo(ctx, &v2.DerivativeMarketSettlementInfo{
-		MarketId:        derivativeMarket.MarketId,
-		SettlementPrice: *settlementPrice,
+		MarketId:           derivativeMarket.MarketId,
+		SettlementPrice:    *settlementPrice,
+		IsForcedSettlement: true,
 	})
 
 	return nil

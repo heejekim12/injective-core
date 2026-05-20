@@ -6,6 +6,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/events"
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/risk"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 )
@@ -179,7 +180,7 @@ func (k DerivativeKeeper) GetDerivativeMarketOrderExecutionData(
 			marketOrderTradeFeeRate = math.LegacyZeroDec() // no trading fees for liquidations
 		}
 
-		marketOrderStateExpansions, marketOrderCancels := k.ProcessDerivativeMarketOrderbookMatchingResults(
+		marketOrderStateExpansions, marketOrderCancels, crossPoolEvictions := k.ProcessDerivativeMarketOrderbookMatchingResults(
 			ctx,
 			market,
 			funding,
@@ -190,7 +191,11 @@ func (k DerivativeKeeper) GetDerivativeMarketOrderExecutionData(
 			marketOrderTradeFeeRate,
 			tradeRewardsMultiplierConfig.TakerPointsMultiplier,
 			feeDiscountConfig,
+			markPrice,
+			m.marketOrderbook.olrDecrementedOrders,
 		)
+		// Immediate execution is single-threaded, so evict inline (dedup to avoid redundant work).
+		evictCrossPoolSnapshots(k, ctx, crossPoolEvictions)
 
 		derivativeMarketOrderExecutionData.OpenInterestDelta = derivativeMarketOrderExecutionData.OpenInterestDelta.Add(
 			m.marketOrderbook.GetOpenInterestDelta(),
@@ -259,6 +264,9 @@ func (k DerivativeKeeper) PersistSingleDerivativeMarketOrderExecution(
 		return tradingRewardPoints, true
 	}
 
+	// Apply deferred cross-pool snapshot evictions from the parallel matching phase.
+	evictCrossPoolSnapshots(k, ctx, execution.CrossPoolSnapshotEvictions)
+
 	marketID := execution.Market.MarketID()
 	isMarketSolvent = k.EnsureMarketSolvency(ctx, execution.Market, execution.MarketBalanceDelta, true)
 
@@ -295,6 +303,9 @@ func (k DerivativeKeeper) PersistSingleDerivativeMarketOrderExecution(
 				execution.DepositDeltas[subaccountID],
 			)
 		}
+		// Deposit-only subaccounts (e.g. fee recipients) may have a cached cross-pool
+		// snapshot from earlier in the block. The balance change above makes it stale.
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 	}
 
 	k.UpdateDerivativeLimitOrdersFromFilledDeltas(ctx, marketID, true, execution.RestingLimitOrderFilledDeltas, nil)
@@ -491,13 +502,30 @@ func (k DerivativeKeeper) ApplyPositionDeltaAndGetDerivativeLimitOrderStateExpan
 		availableBalanceChange = availableBalanceChange.Add(feeData.TraderFee.Abs())
 	}
 
-	availableBalanceChange, totalBalanceChange, feeDebtMarketBalanceDelta := k.adjustPositionMarginIfNecessary(
-		ctx,
-		market,
-		position,
-		availableBalanceChange,
-		totalBalanceChange,
-	)
+	// Cross margin does not use per-order (additive) deposit holds for derivative orders.
+	// Apply the economic delta identically to AvailableBalance and TotalBalance.
+	// Skip adjustPositionMarginIfNecessary for CM: that function embeds negative
+	// availableBalanceChange into position margin to handle fee debt from insufficient
+	// order holds. CM has no per-order holds, so the deposit absorbs the full delta
+	// directly and there is no fee debt to embed.
+	isCrossMargin := false
+	if profile, _ := k.RiskEngine().EffectiveProfile(ctx, order.SubaccountID()); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+		availableBalanceChange = totalBalanceChange
+		isCrossMargin = true
+	}
+
+	var feeDebtMarketBalanceDelta math.LegacyDec
+	if isCrossMargin {
+		feeDebtMarketBalanceDelta = math.LegacyZeroDec()
+	} else {
+		availableBalanceChange, totalBalanceChange, feeDebtMarketBalanceDelta = k.adjustPositionMarginIfNecessary(
+			ctx,
+			market,
+			position,
+			availableBalanceChange,
+			totalBalanceChange,
+		)
+	}
 
 	marketBalanceDelta := v2.GetMarketBalanceDelta(payout, collateralizationMargin, feeData.TraderFee, order.IsReduceOnly()).
 		Add(feeDebtMarketBalanceDelta)
@@ -572,17 +600,34 @@ func (k DerivativeKeeper) ProcessDerivativeMarketOrderbookMatchingResults(
 	tradeFeeRate math.LegacyDec,
 	tradeRewardsMultiplier math.LegacyDec,
 	feeDiscountConfig *v2.FeeDiscountConfig,
-) ([]*v2.DerivativeOrderStateExpansion, []*v2.DerivativeMarketOrderCancel) {
+	markPrice math.LegacyDec,
+	olrDecrementedOrders map[int]struct{},
+) ([]*v2.DerivativeOrderStateExpansion, []*v2.DerivativeMarketOrderCancel, []common.Hash) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "ProcessDerivativeMarketOrderbookMatchingResults")()
 
 	stateExpansions := make([]*v2.DerivativeOrderStateExpansion, len(marketOrders))
 	ordersToCancel := make([]*v2.DerivativeMarketOrderCancel, 0, len(marketOrders))
+	var crossPoolEvictions []common.Hash
 
 	for idx := range marketOrders {
 		o := marketOrders[idx]
 		unfilledQuantity := o.OrderInfo.Quantity.Sub(marketFillQuantities[idx])
 
 		if clearingPrice.IsNil() {
+			// Isolated margin charges a per-order hold (MarginHold) at placement, so cancellation
+			// must refund it back to AvailableBalance. Cross-margin uses pool-level order locking
+			// and never charges per-order holds (MarginHold is zero), so no refund is needed.
+			availableBalanceDelta := o.MarginHold
+			if profile, _ := k.RiskEngine().EffectiveProfile(ctx, o.SubaccountID()); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+				availableBalanceDelta = math.LegacyZeroDec()
+				// Record for deferred eviction: admission inflated the cached OLR for this
+				// order, but the order is fully unfilled and will be cancelled. Without eviction
+				// the stale OLR persists for the rest of the block and can reject later orders.
+				// Eviction is deferred to the single-threaded persistence phase because this
+				// function may run inside parallel market goroutines.
+				crossPoolEvictions = append(crossPoolEvictions, o.SubaccountID())
+			}
+
 			stateExpansions[idx] = &v2.DerivativeOrderStateExpansion{
 				SubaccountID:          o.SubaccountID(),
 				PositionDelta:         nil,
@@ -590,7 +635,7 @@ func (k DerivativeKeeper) ProcessDerivativeMarketOrderbookMatchingResults(
 				Pnl:                   math.LegacyZeroDec(),
 				MarketBalanceDelta:    math.LegacyZeroDec(),
 				TotalBalanceDelta:     math.LegacyZeroDec(),
-				AvailableBalanceDelta: o.MarginHold,
+				AvailableBalanceDelta: availableBalanceDelta,
 				AuctionFeeReward:      math.LegacyZeroDec(),
 				TradingRewardPoints:   math.LegacyZeroDec(),
 				FeeRecipientReward:    math.LegacyZeroDec(),
@@ -624,10 +669,27 @@ func (k DerivativeKeeper) ProcessDerivativeMarketOrderbookMatchingResults(
 				MarketOrder:    o,
 				CancelQuantity: unfilledQuantity,
 			})
+
+			// Decrement the stage-local last-look OLR for the unfilled remainder so that
+			// subsequent orders from the same cross-margin subaccount (e.g. on the opposite
+			// side of the same market) are not evaluated against an inflated OLR.
+			// Skip if shouldSkipOrder already decremented OLR for this order to avoid double-counting.
+			if _, alreadyDecremented := olrDecrementedOrders[idx]; !alreadyDecremented {
+				k.RiskEngine().DecrementLastLookOLR(ctx, o.SubaccountID(), o, market, markPrice, unfilledQuantity)
+			}
+
+			// Cross-margin zero-fill cancels with a valid clearing price don't go through the
+			// nil-clearing-price eviction path above. Record them for deferred eviction so the
+			// snapshot cache doesn't carry stale OLR from the cancelled order.
+			if marketFillQuantities[idx].IsZero() {
+				if profile, _ := k.RiskEngine().EffectiveProfile(ctx, o.SubaccountID()); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+					crossPoolEvictions = append(crossPoolEvictions, o.SubaccountID())
+				}
+			}
 		}
 	}
 
-	return stateExpansions, ordersToCancel
+	return stateExpansions, ordersToCancel, crossPoolEvictions
 }
 
 //nolint:revive //ok
@@ -709,13 +771,30 @@ func (k DerivativeKeeper) applyPositionDeltaAndGetDerivativeMarketOrderStateExpa
 		Add(matchedFeeRefundOrCharge).
 		Add(unmatchedFeeRefund)
 
-	availableBalanceChange, totalBalanceChange, feeDebtMarketBalanceDelta := k.adjustPositionMarginIfNecessary(
-		ctx,
-		market,
-		position,
-		availableBalanceChange,
-		totalBalanceChange,
-	)
+	// Cross margin does not use per-order (additive) deposit holds for derivative orders.
+	// Apply the economic delta identically to AvailableBalance and TotalBalance.
+	// Skip adjustPositionMarginIfNecessary for CM: that function embeds negative
+	// availableBalanceChange into position margin to handle fee debt from insufficient
+	// order holds. CM has no per-order holds, so the deposit absorbs the full delta
+	// directly and there is no fee debt to embed.
+	isCrossMargin := false
+	if profile, _ := k.RiskEngine().EffectiveProfile(ctx, order.SubaccountID()); profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS {
+		availableBalanceChange = totalBalanceChange
+		isCrossMargin = true
+	}
+
+	var feeDebtMarketBalanceDelta math.LegacyDec
+	if isCrossMargin {
+		feeDebtMarketBalanceDelta = math.LegacyZeroDec()
+	} else {
+		availableBalanceChange, totalBalanceChange, feeDebtMarketBalanceDelta = k.adjustPositionMarginIfNecessary(
+			ctx,
+			market,
+			position,
+			availableBalanceChange,
+			totalBalanceChange,
+		)
+	}
 
 	marketBalanceDelta := v2.GetMarketBalanceDelta(payout, collateralizationMargin, feeData.TraderFee, order.IsReduceOnly()).
 		Add(feeDebtMarketBalanceDelta)
@@ -880,6 +959,9 @@ func (k DerivativeKeeper) PersistDerivativeMatchingExecution(
 		isMarketSolvent := k.EnsureMarketSolvency(ctx, execution.Market, execution.MarketBalanceDelta, shouldCancelMarketOrders)
 
 		if !isMarketSolvent {
+			// Market was matched but found insolvent — deposits won't be applied, so transient
+			// limit orders still hold locked margin. Cancel them to release funds and clean metadata.
+			k.CancelAllTransientDerivativeLimitOrders(ctx, execution.Market)
 			continue
 		}
 
@@ -900,6 +982,7 @@ func (k DerivativeKeeper) PersistDerivativeMatchingExecution(
 
 		for _, subaccountID := range execution.DepositSubaccountIDs {
 			k.subaccount.UpdateDepositWithDelta(ctx, subaccountID, execution.Market.GetQuoteDenom(), execution.DepositDeltas[subaccountID])
+			k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
 		}
 
 		for idx, subaccountID := range execution.PositionSubaccountIDs {
@@ -949,11 +1032,14 @@ func (k DerivativeKeeper) PersistDerivativeMarketOrderExecution(
 	derivativeVwapData v2.DerivativeVwapInfo,
 	tradingRewardPoints types.TradingRewardPoints,
 	modifiedPositionCache v2.ModifiedPositionCache,
-) types.TradingRewardPoints {
+) (types.TradingRewardPoints, map[common.Hash]struct{}) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "PersistDerivativeMarketOrderExecution")()
 
+	var insolventMarkets map[common.Hash]struct{}
+
 	for _, derivativeExecutionData := range batchDerivativeExecutionData {
-		tradingRewardPoints, _ = k.PersistSingleDerivativeMarketOrderExecution(
+		var isMarketSolvent bool
+		tradingRewardPoints, isMarketSolvent = k.PersistSingleDerivativeMarketOrderExecution(
 			ctx,
 			derivativeExecutionData,
 			derivativeVwapData,
@@ -961,9 +1047,64 @@ func (k DerivativeKeeper) PersistDerivativeMarketOrderExecution(
 			modifiedPositionCache,
 			false,
 		)
+
+		if derivativeExecutionData != nil && !isMarketSolvent {
+			if insolventMarkets == nil {
+				insolventMarkets = make(map[common.Hash]struct{})
+			}
+			insolventMarkets[derivativeExecutionData.Market.MarketID()] = struct{}{}
+		}
 	}
 
-	return tradingRewardPoints
+	return tradingRewardPoints, insolventMarkets
+}
+
+// DeleteConsumedTransientDerivativeMarketOrders removes all transient derivative market orders
+// for a given market from the transient store.
+//
+// IMPORTANT: This must only be called from the FBA stage-1 batch path (EndBlocker), after all
+// transient market orders for the market have been fully processed (filled or cancelled).
+// It must NOT be called from immediate execution paths (atomic orders, liquidations) because
+// those paths process only a single order and would incorrectly delete unrelated queued orders.
+func (k DerivativeKeeper) DeleteConsumedTransientDerivativeMarketOrders(ctx sdk.Context, marketID common.Hash) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "DeleteConsumedTransientDerivativeMarketOrders")()
+
+	for _, isBuy := range []bool{true, false} {
+		orders := k.GetAllTransientDerivativeMarketOrdersByMarketDirection(ctx, marketID, isBuy)
+		for _, order := range orders {
+			k.DeleteDerivativeMarketOrder(ctx, order, marketID)
+		}
+	}
+}
+
+// CancelUnprocessedTransientDerivativeMarketOrders cancels all transient derivative market orders
+// for a market that was not processed (e.g. disabled market or missing mark price).
+// Unlike DeleteConsumedTransientDerivativeMarketOrders, this properly refunds margin holds
+// and emits cancel events for each order.
+func (k DerivativeKeeper) CancelUnprocessedTransientDerivativeMarketOrders(ctx sdk.Context, marketID common.Hash) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "CancelUnprocessedTransientDerivativeMarketOrders")()
+
+	// GetDerivativeMarketByID returns both enabled and disabled derivative markets.
+	// Binary options markets are stored separately, so also check GetBinaryOptionsMarketByID.
+	var market v2.DerivativeMarketI
+	if m := k.GetDerivativeMarketByID(ctx, marketID); m != nil {
+		market = m
+	} else if m := k.GetBinaryOptionsMarketByID(ctx, marketID); m != nil {
+		market = m
+	}
+	if market == nil {
+		// Market no longer exists in the store at all — should not happen in practice.
+		// Fall back to bare deletion; there is no way to compute the refund without market metadata.
+		k.DeleteConsumedTransientDerivativeMarketOrders(ctx, marketID)
+		return
+	}
+
+	for _, isBuy := range []bool{true, false} {
+		orders := k.GetAllTransientDerivativeMarketOrdersByMarketDirection(ctx, marketID, isBuy)
+		for _, order := range orders {
+			k.CancelDerivativeMarketOrder(ctx, market, order)
+		}
+	}
 }
 
 // ExecuteDerivativeMarketOrderImmediately executes market order immediately (without waiting for end-blocker). Used for atomic orders execution by smart contract, and for liquidations
@@ -980,6 +1121,10 @@ func (k DerivativeKeeper) ExecuteDerivativeMarketOrderImmediately(
 	isLiquidation bool,
 ) (*v2.DerivativeMarketOrderResults, bool, error) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "ExecuteDerivativeMarketOrderImmediately")()
+
+	// Attach last-look cache for consistent cross-margin order evaluation.
+	// This prevents over-cancellation when resting orders from cross accounts are matched.
+	ctx = risk.WithCrossMarginLastLookCache(ctx)
 
 	marketBuyOrders := make([]*v2.DerivativeMarketOrder, 0)
 	marketSellOrders := make([]*v2.DerivativeMarketOrder, 0)
@@ -1035,6 +1180,7 @@ func (k DerivativeKeeper) ExecuteDerivativeMarketOrderImmediately(
 		funding,
 		positionStates,
 		isLiquidation,
+		k.makeIsCrossSubaccountFn(ctx),
 	)
 
 	modifiedPositionCache := v2.NewModifiedPositionCache()
@@ -1067,6 +1213,11 @@ func (k DerivativeKeeper) ExecuteDerivativeMarketOrderImmediately(
 	return results, isMarketSolvent, nil
 }
 
+func (k DerivativeKeeper) makeIsCrossSubaccountFn(ctx sdk.Context) func(common.Hash) bool {
+	defer k.Meter(ctx).FuncTiming(&ctx, "makeIsCrossSubaccountFn")()
+
+	return k.RiskEngine().MakeIsCrossSubaccountFn(ctx)
+}
 func (k DerivativeKeeper) PersistPerpetualFundingInfo(ctx sdk.Context, perpetualVwapInfo v2.DerivativeVwapInfo) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "PersistPerpetualFundingInfo")()
 
@@ -1219,4 +1370,16 @@ type FilteredTransientOrderResults struct {
 	TransientLimitSellOrders         []*v2.DerivativeLimitOrder
 	TransientLimitBuyOrdersToCancel  []*v2.DerivativeLimitOrder
 	TransientLimitSellOrdersToCancel []*v2.DerivativeLimitOrder
+}
+
+// evictCrossPoolSnapshots deduplicates and evicts cross-pool snapshot caches for the given subaccounts.
+func evictCrossPoolSnapshots(k DerivativeKeeper, ctx sdk.Context, subaccountIDs []common.Hash) {
+	seen := make(map[common.Hash]struct{}, len(subaccountIDs))
+	for _, subID := range subaccountIDs {
+		if _, ok := seen[subID]; ok {
+			continue
+		}
+		seen[subID] = struct{}{}
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subID)
+	}
 }

@@ -20,7 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/InjectiveLabs/injective-core/cmd/injectived/config"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 	"github.com/InjectiveLabs/injective-core/injective-chain/crypto/ethsecp256k1"
 	rpctypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/rpc/types"
 	evmtypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/types"
@@ -245,7 +245,7 @@ func (b *Backend) NewMnemonic(uid string,
 // NOTE: this function accepts only integers to have the same interface than go-eth
 // to use float values, the gas prices must be configured using the configuration file
 func (b *Backend) SetGasPrice(gasPrice hexutil.Big) bool {
-	appConf, err := config.ParseConfig(b.clientCtx.Viper)
+	appConf, err := config.GetConfig(b.clientCtx.Viper)
 	if err != nil {
 		b.logger.Debug("could not get the server config", "error", err.Error())
 		return false

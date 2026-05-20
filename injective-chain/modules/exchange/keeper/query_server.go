@@ -9,6 +9,8 @@ import (
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/utils"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/ethereum/go-ethereum/common"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
@@ -71,6 +73,170 @@ func (q queryServer) L3SpotOrderBook(c context.Context, req *v2.QueryFullSpotOrd
 		Seq:  sequence,
 	}
 	return res, nil
+}
+
+func (q queryServer) SubaccountRiskProfile(
+	c context.Context, req *v2.QuerySubaccountRiskProfileRequest,
+) (*v2.QuerySubaccountRiskProfileResponse, error) {
+	ctx := sdk.UnwrapSDKContext(c)
+	defer q.Keeper.Meter(ctx).FuncTiming(&ctx, "SubaccountRiskProfile")()
+
+	if req == nil || req.SubaccountId == "" {
+		return nil, status.Error(codes.InvalidArgument, "subaccount_id is required")
+	}
+
+	if _, ok := types.IsValidSubaccountID(req.SubaccountId); !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid subaccount_id format: %s", req.SubaccountId)
+	}
+
+	subaccountID := common.HexToHash(req.SubaccountId)
+	profile, isDefault := q.Keeper.GetEffectiveSubaccountRiskProfile(ctx, subaccountID)
+
+	return &v2.QuerySubaccountRiskProfileResponse{
+		Profile:   profile,
+		IsDefault: isDefault,
+	}, nil
+}
+
+func (q queryServer) CrossMarginPoolSnapshot(
+	c context.Context, req *v2.QueryCrossMarginPoolSnapshotRequest,
+) (*v2.QueryCrossMarginPoolSnapshotResponse, error) {
+	ctx := sdk.UnwrapSDKContext(c)
+	defer q.Keeper.Meter(ctx).FuncTiming(&ctx, "CrossMarginPoolSnapshot")()
+
+	if req == nil || req.SubaccountId == "" {
+		return nil, status.Error(codes.InvalidArgument, "subaccount_id is required")
+	}
+	if req.QuoteDenom == "" {
+		return nil, status.Error(codes.InvalidArgument, "quote_denom is required")
+	}
+
+	if _, ok := types.IsValidSubaccountID(req.SubaccountId); !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid subaccount_id format: %s", req.SubaccountId)
+	}
+
+	subaccountID := common.HexToHash(req.SubaccountId)
+
+	// Validate that the subaccount is in cross-margin mode.
+	// This query is only meaningful for cross-margin subaccounts; isolated-mode subaccounts
+	// use per-position liquidation checks and should not rely on pool-level snapshots.
+	profile, _ := q.Keeper.GetEffectiveSubaccountRiskProfile(ctx, subaccountID)
+	if profile == nil || profile.Mode != v2.RiskMode_RISK_MODE_CROSS {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"subaccount %s is not in cross-margin mode; this query is only valid for cross-margin subaccounts",
+			req.SubaccountId)
+	}
+
+	quoteDecimals, err := q.resolveQuoteDecimalsForSnapshot(ctx, subaccountID, req.QuoteDenom)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshot, err := q.Keeper.RiskEngine().BuildCrossPoolSnapshot(ctx, subaccountID, req.QuoteDenom, quoteDecimals)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to build cross-margin snapshot: %v", err)
+	}
+
+	resp := &v2.QueryCrossMarginPoolSnapshotResponse{
+		QuoteDenom:                   snapshot.QuoteDenom,
+		QuoteBalance:                 snapshot.QuoteBalance,
+		PositionMarginTotal:          snapshot.PositionMarginTotal,
+		UnrealizedPnl:                snapshot.UnrealizedPnl,
+		UnrealizedPnlEffective:       snapshot.UnrealizedPnlEff,
+		EquityAdmission:              snapshot.EquityAdmission,
+		EquityLiquidation:            snapshot.EquityLiquidation,
+		InitialMarginTotal:           snapshot.InitialMarginTotal,
+		MaintenanceMarginTotal:       snapshot.MaintenanceMarginTotal,
+		InitialMarginWithOrdersTotal: snapshot.InitialMarginWithOrdersTotal,
+		EntryLossTotal:               snapshot.EntryLossTotal,
+		FeeReserveTotal:              snapshot.FeeReserveTotal,
+		OrderLockRequirement:         snapshot.OrderLockRequirement,
+		PositiveUpnlHaircutRate:      snapshot.PositiveUPnLHaircutRate,
+		HealthFactor:                 snapshot.HealthFactor,
+	}
+
+	return resp, nil
+}
+
+// resolveQuoteDecimalsForSnapshot looks up quote decimals from active markets in the denom pool,
+// validating consistency. Falls back to denom metadata for empty pools (preflight UX).
+//
+// Note: We intentionally do NOT reject queries for disabled denoms.
+// During "graceful wind-down" (denom removed from whitelist but positions still exist),
+// users need to query their pool status to understand their risk and close positions.
+func (q queryServer) resolveQuoteDecimalsForSnapshot(
+	ctx sdk.Context,
+	subaccountID common.Hash,
+	quoteDenom string,
+) (uint32, error) {
+	marketIDs := q.Keeper.GetAllActiveDerivativeMarketIDsForSubaccount(ctx, subaccountID)
+
+	quoteDecimals, err := q.resolveDecimalsFromMarkets(ctx, marketIDs, quoteDenom)
+	if err != nil {
+		return 0, err
+	}
+
+	if quoteDecimals == 0 {
+		// No active markets/orders for this denom pool. Try denom metadata first,
+		// then fall back to scanning listed derivative markets (covers IBC denoms
+		// that have markets but no bank metadata).
+		decimals, err := q.Keeper.TokenDenomDecimals(ctx, quoteDenom)
+		if err == nil && decimals > 0 {
+			quoteDecimals = decimals
+		} else {
+			quoteDecimals = q.resolveDecimalsFromListedMarkets(ctx, quoteDenom)
+		}
+		if quoteDecimals == 0 {
+			return 0, status.Errorf(codes.NotFound, "no markets found for quote denom %s", quoteDenom)
+		}
+	}
+	return quoteDecimals, nil
+}
+
+// resolveDecimalsFromListedMarkets scans all enabled derivative markets for the given quote denom
+// and returns QuoteDecimals from the first match. Used as a fallback when the subaccount has no
+// exposure and bank metadata is unavailable (e.g. IBC denoms).
+func (q queryServer) resolveDecimalsFromListedMarkets(ctx sdk.Context, quoteDenom string) uint32 {
+	var decimals uint32
+	q.Keeper.IterateDerivativeMarkets(ctx, nil, func(market *v2.DerivativeMarket) (stop bool) {
+		if market.QuoteDenom == quoteDenom && market.QuoteDecimals > 0 {
+			decimals = market.QuoteDecimals
+			return true
+		}
+		return false
+	})
+	return decimals
+}
+
+func (q queryServer) resolveDecimalsFromMarkets(ctx sdk.Context, marketIDs []common.Hash, quoteDenom string) (uint32, error) {
+	var quoteDecimals uint32
+	for _, marketID := range marketIDs {
+		market := q.Keeper.GetDerivativeMarketByID(ctx, marketID)
+		if market == nil || market.QuoteDenom != quoteDenom || market.GetMarketType().IsBinaryOptions() {
+			continue
+		}
+		if market.QuoteDecimals == 0 {
+			return 0, status.Errorf(
+				codes.Internal,
+				"invalid quote decimals (0) for market %s (quote denom %s)",
+				marketID.Hex(),
+				quoteDenom,
+			)
+		}
+		if quoteDecimals == 0 {
+			quoteDecimals = market.QuoteDecimals
+		} else if market.QuoteDecimals != quoteDecimals {
+			return 0, status.Errorf(
+				codes.Internal,
+				"inconsistent quote decimals in cross-pool: market %s has %d, expected %d (quote denom %s)",
+				marketID.Hex(),
+				market.QuoteDecimals,
+				quoteDecimals,
+				quoteDenom,
+			)
+		}
+	}
+	return quoteDecimals, nil
 }
 
 func (q queryServer) QueryExchangeParams(c context.Context, _ *v2.QueryExchangeParamsRequest) (*v2.QueryExchangeParamsResponse, error) {
@@ -961,8 +1127,11 @@ func (q queryServer) SubaccountPositionInMarket(
 	marketID := common.HexToHash(req.MarketId)
 	subaccountID := common.HexToHash(req.SubaccountId)
 
+	profile, _ := q.Keeper.GetEffectiveSubaccountRiskProfile(ctx, subaccountID)
+
 	resp := &v2.QuerySubaccountPositionInMarketResponse{
-		State: q.Keeper.GetPosition(ctx, marketID, subaccountID),
+		State:    q.Keeper.GetPosition(ctx, marketID, subaccountID),
+		RiskMode: profile.Mode,
 	}
 
 	return resp, nil
@@ -975,10 +1144,16 @@ func (q queryServer) SubaccountEffectivePositionInMarket(
 	defer q.Keeper.Meter(ctx).FuncTiming(&ctx, "SubaccountEffectivePositionInMarket")()
 
 	marketID := common.HexToHash(req.MarketId)
-	position := q.Keeper.GetPosition(ctx, marketID, common.HexToHash(req.SubaccountId))
+	subaccountID := common.HexToHash(req.SubaccountId)
+	position := q.Keeper.GetPosition(ctx, marketID, subaccountID)
+
+	profile, _ := q.Keeper.GetEffectiveSubaccountRiskProfile(ctx, subaccountID)
 
 	if position == nil {
-		return &v2.QuerySubaccountEffectivePositionInMarketResponse{State: nil}, nil
+		return &v2.QuerySubaccountEffectivePositionInMarketResponse{
+			State:    nil,
+			RiskMode: profile.Mode,
+		}, nil
 	}
 
 	funding := q.Keeper.GetPerpetualMarketFunding(ctx, marketID)
@@ -992,7 +1167,8 @@ func (q queryServer) SubaccountEffectivePositionInMarket(
 	}
 
 	resp := &v2.QuerySubaccountEffectivePositionInMarketResponse{
-		State: &effectivePosition,
+		State:    &effectivePosition,
+		RiskMode: profile.Mode,
 	}
 
 	return resp, nil

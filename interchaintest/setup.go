@@ -28,10 +28,6 @@ import (
 	tokenfactorytypes "github.com/InjectiveLabs/sdk-go/chain/tokenfactory/types"
 	wasmxtypes "github.com/InjectiveLabs/sdk-go/chain/wasmx/types"
 	"github.com/avast/retry-go/v4"
-	ismtypes "github.com/bcp-innovations/hyperlane-cosmos/x/core/01_interchain_security/types"
-	pdtypes "github.com/bcp-innovations/hyperlane-cosmos/x/core/02_post_dispatch/types"
-	hyperlanetypes "github.com/bcp-innovations/hyperlane-cosmos/x/core/types"
-	warptypes "github.com/bcp-innovations/hyperlane-cosmos/x/warp/types"
 	cosmtestutil "github.com/cosmos/cosmos-sdk/types/module/testutil"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	authztypes "github.com/cosmos/cosmos-sdk/x/authz"
@@ -107,11 +103,6 @@ func injectiveEncoding() *cosmtestutil.TestEncodingConfig {
 	wasmxtypes.RegisterInterfaces(cfg.InterfaceRegistry)
 	authztypes.RegisterInterfaces(cfg.InterfaceRegistry)
 
-	hyperlanetypes.RegisterInterfaces(cfg.InterfaceRegistry)
-	warptypes.RegisterInterfaces(cfg.InterfaceRegistry)
-	ismtypes.RegisterInterfaces(cfg.InterfaceRegistry)
-	pdtypes.RegisterInterfaces(cfg.InterfaceRegistry)
-
 	// TODO: types dependency shall be moved to sdk-go
 	evmtypes.RegisterInterfaces(cfg.InterfaceRegistry)
 	erc20types.RegisterInterfaces(cfg.InterfaceRegistry)
@@ -156,9 +147,12 @@ func InjectiveChainConfig(
 	websocketOverrides["address"] = "0.0.0.0:9998"
 	websocketOverrides["max-open-connections"] = 100
 
+	chainStreamOverrides := make(testutil.Toml)
+	chainStreamOverrides["server"] = "0.0.0.0:9999"
+
 	appTomlOverrides := make(testutil.Toml)
 	appTomlOverrides["json-rpc"] = jsonRpcOverrides
-	appTomlOverrides["chainstream-server"] = "0.0.0.0:9999"
+	appTomlOverrides["chainstream"] = chainStreamOverrides
 	appTomlOverrides["injective-websocket"] = websocketOverrides
 
 	config := ibc.ChainConfig{
@@ -388,6 +382,11 @@ func isRetryableDockerPortBindError(err error) bool {
 		strings.Contains(msg, "failed to set up container networking")
 }
 
+const (
+	peggoRateLimitAdminMnemonic = "cube teach job unknown manage evidence whisper moon zebra name derive kite venue fit galaxy nephew expose badge pride cake crash adjust derive provide"
+	peggoRateLimitAdminAddress  = "inj1ps9tafd33sdu5fc4xgkj54cxwp6u7cx74vur0l"
+)
+
 func WireUpPeggo(
 	t *testing.T,
 	ctx context.Context,
@@ -467,7 +466,7 @@ func WireUpPeggo(
 		CosmosCoinErc20Contract:       contracts.InjectiveCoin.String(),
 		ClaimSlashingEnabled:          false,
 		BridgeContractStartHeight:     contracts.StartHeight,
-		Admins:                        []string{authtypes.NewModuleAddress(govtypes.ModuleName).String()},
+		Admins:                        []string{authtypes.NewModuleAddress(govtypes.ModuleName).String(), peggoRateLimitAdminAddress},
 		SegregatedWalletAddress:       "inj1dqryh824u0w7p6ajk2gsr29tgj6d0nkfwsgs46",
 	}
 
@@ -504,6 +503,10 @@ func WireUpPeggo(
 	time.Sleep(1 * time.Second)
 
 	t.Log("peggo sidecars started")
+
+	// Once Peggo is wired up, wait until the first relayed valset update is observed.
+	latestValset := helpers.GetPeggyModuleState(t, ctx, cosmosChain).GetValsets()[0]
+	helpers.AwaitLastObservedValsetNonce(t, ctx, 1*time.Minute, cosmosChain, latestValset.Nonce)
 
 	return contracts
 }

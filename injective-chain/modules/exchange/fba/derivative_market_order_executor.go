@@ -73,6 +73,8 @@ func (e *DerivativeMarketOrderExecutor) Execute(ctx sdk.Context, stakingInfo *v2
 	marketBuyOrders := e.keeper.GetAllTransientDerivativeMarketOrdersByMarketDirection(ctx, marketID, true)
 	marketSellOrders := e.keeper.GetAllTransientDerivativeMarketOrdersByMarketDirection(ctx, marketID, false)
 
+	isCrossSubaccount := makeIsCrossSubaccountFn(ctx, e.keeper)
+
 	if len(marketBuyOrders) == 0 && len(marketSellOrders) == 0 {
 		emptyExpansion := &v2.DerivativeMarketOrderExpansionData{
 			OpenInterestDelta:  math.LegacyZeroDec(),
@@ -84,6 +86,7 @@ func (e *DerivativeMarketOrderExecutor) Execute(ctx sdk.Context, stakingInfo *v2
 			e.funding,
 			e.positionStates,
 			false,
+			isCrossSubaccount,
 		)
 	}
 
@@ -101,6 +104,7 @@ func (e *DerivativeMarketOrderExecutor) Execute(ctx sdk.Context, stakingInfo *v2
 		e.funding,
 		e.positionStates,
 		isLiquidation,
+		isCrossSubaccount,
 	)
 
 	return batchExecutionData
@@ -269,7 +273,7 @@ func (e *DerivativeMarketOrderExecutor) processMarketOrderSide(
 	}
 
 	// Process market order results
-	marketOrderStateExpansions, marketOrderCancels := e.keeper.ProcessDerivativeMarketOrderbookMatchingResults(
+	marketOrderStateExpansions, marketOrderCancels, crossPoolEvictions := e.keeper.ProcessDerivativeMarketOrderbookMatchingResults(
 		ctx,
 		e.market,
 		e.funding,
@@ -280,7 +284,10 @@ func (e *DerivativeMarketOrderExecutor) processMarketOrderSide(
 		marketOrderTradeFeeRate,
 		tradeRewardsMultiplierConfig.TakerPointsMultiplier,
 		feeDiscountConfig,
+		e.markPrice,
+		marketOrderbook.GetOLRDecrementedOrders(),
 	)
+	executionData.CrossPoolSnapshotEvictions = append(executionData.CrossPoolSnapshotEvictions, crossPoolEvictions...)
 
 	executionData.OpenInterestDelta = executionData.OpenInterestDelta.Add(
 		marketOrderbook.GetOpenInterestDelta(),

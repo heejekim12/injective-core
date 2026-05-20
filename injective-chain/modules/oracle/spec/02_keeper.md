@@ -13,23 +13,23 @@ The `ViewKeeper` provides read access to prices and cumulative prices for any su
 
 ```go
 type ViewKeeper interface {
-    // GetPrice returns the price for a given pair and oracle type.
-    GetPrice(ctx sdk.Context, oracletype types.OracleType, base string, quote string) *math.LegacyDec
+    // GetReferencePrice returns the reference price for a pair and oracle type (oracle assistants when applicable, with legacy Band/BandIBC resolution otherwise).
+    GetReferencePrice(ctx sdk.Context, oracletype types.OracleType, base string, quote string) *math.LegacyDec
     // GetCumulativePrice returns the base and quote cumulative prices for TWAP calculation.
     // For USD quotes and PriceFeed oracles, quoteCumulative represents elapsed time (block time).
     GetCumulativePrice(ctx sdk.Context, oracleType types.OracleType, base string, quote string) (baseCumulative, quoteCumulative *math.LegacyDec)
     // GetProviderPrice returns the price for a given provider and symbol.
-    GetProviderPrice(ctx sdk.Context, oracletype types.OracleType, provider string, symbol string) *math.LegacyDec
+    GetProviderPrice(ctx sdk.Context, provider string, symbol string) *math.LegacyDec
     // GetCumulativeProviderPrice returns the cumulative price for a given provider and symbol.
-    GetCumulativeProviderPrice(ctx sdk.Context, oracleType types.OracleType, provider string, symbol string) *math.LegacyDec
+    GetCumulativeProviderPrice(ctx sdk.Context, provider string, symbol string) *math.LegacyDec
 }
 ```
 
 Notes:
 
-- `GetPrice` for Coinbase oracles returns the 5-minute TWAP price.
+- `GetReferencePrice` for Coinbase oracles returns the 5-minute TWAP price.
 - `GetCumulativePrice` returns two values: the base cumulative price and the quote cumulative price. For USD quotes or PriceFeed oracles, the quote cumulative equals the block timestamp, enabling a unified TWAP formula: `TWAP = (baseCum₂ - baseCum₁) / (quoteCum₂ - quoteCum₁)`.
-- For `OracleType_Provider`, `GetProviderPrice` and `GetCumulativeProviderPrice` must be used instead of `GetPrice`.
+- For `OracleType_Provider`, `GetProviderPrice` and `GetCumulativeProviderPrice` are the provider-specific accessors; `GetReferencePrice` also resolves provider prices via the provider oracle assistant when given the same base/quote layout as exchange markets.
 
 ## Band (Deprecated)
 
@@ -157,7 +157,7 @@ type StorkKeeper interface {
     GetAllStorkPublishers(ctx sdk.Context) []string
 
     SetStorkPriceState(ctx sdk.Context, priceData *types.StorkPriceState)
-    GetStorkPriceState(ctx sdk.Context, symbol string) types.StorkPriceState
+    GetStorkPriceState(ctx sdk.Context, symbol string) *types.StorkPriceState
     GetAllStorkPriceStates(ctx sdk.Context) []*types.StorkPriceState
 }
 ```

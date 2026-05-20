@@ -2,10 +2,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -99,6 +101,7 @@ func NewTxCmd() *cobra.Command {
 		NewIncreasePositionMarginTxCmd(),
 		NewDecreasePositionMarginTxCmd(),
 		NewMsgLiquidatePositionTxCmd(),
+		NewMsgBatchLiquidatePositionsTxCmd(),
 		NewActivatePostOnlyModeTxCmd(),
 		NewCancelPostOnlyModeTxCmd(),
 	)
@@ -779,6 +782,7 @@ func NewPerpetualMarketLaunchProposalTxCmd() *cobra.Command {
 				"MinNotional":            cli.Flag{Flag: FlagMinNotional},
 				"Admin":                  cli.Flag{Flag: FlagAdmin},
 				"AdminPermissions":       cli.Flag{Flag: FlagAdminPermissions},
+				"CrossMarginEligible":    cli.Flag{Flag: FlagCrossMarginEligible},
 			}
 			argsMapping := cli.ArgsMapping{}
 
@@ -858,6 +862,7 @@ func NewPerpetualMarketLaunchProposalTxCmd() *cobra.Command {
 	cmd.Flags().String(FlagOpenNotionalCap, "uncapped", "open notional cap")
 	cmd.Flags().String(FlagAdmin, "", "market admin")
 	cmd.Flags().Uint32(FlagAdminPermissions, 0, "admin permissions level")
+	cmd.Flags().Bool(FlagCrossMarginEligible, false, "set if market is eligible for cross-margin")
 	cmd.Flags().Bool(FlagExpedited, false, "set the expedited value for the governance proposal")
 	cliflags.AddGovProposalFlags(cmd)
 	cliflags.AddTxFlagsToCmd(cmd)
@@ -914,6 +919,7 @@ func NewExpiryFuturesMarketLaunchProposalTxCmd() *cobra.Command {
 				"MinNotional":            cli.Flag{Flag: FlagMinNotional},
 				"Admin":                  cli.Flag{Flag: FlagAdmin},
 				"AdminPermissions":       cli.Flag{Flag: FlagAdminPermissions},
+				"CrossMarginEligible":    cli.Flag{Flag: FlagCrossMarginEligible},
 			}
 			argsMapping := cli.ArgsMapping{}
 
@@ -999,6 +1005,7 @@ func NewExpiryFuturesMarketLaunchProposalTxCmd() *cobra.Command {
 	cmd.Flags().String(FlagOpenNotionalCap, "uncapped", "open notional cap")
 	cmd.Flags().String(FlagAdmin, "", "market admin")
 	cmd.Flags().Uint32(FlagAdminPermissions, 0, "admin permissions level")
+	cmd.Flags().Bool(FlagCrossMarginEligible, false, "set if market is eligible for cross-margin")
 	cmd.Flags().Bool(FlagExpedited, false, "set the expedited value for the governance proposal")
 	cliflags.AddGovProposalFlags(cmd)
 	cliflags.AddTxFlagsToCmd(cmd)
@@ -1133,6 +1140,11 @@ func NewInstantPerpetualMarketLaunchTxCmd() *cobra.Command {
 				return err
 			}
 
+			crossMarginEligible, err := cmd.Flags().GetBool(FlagCrossMarginEligible)
+			if err != nil {
+				return err
+			}
+
 			msg := &exchangev2.MsgInstantPerpetualMarketLaunch{
 				Sender:                 clientCtx.GetFromAddress().String(),
 				Ticker:                 ticker,
@@ -1150,6 +1162,7 @@ func NewInstantPerpetualMarketLaunchTxCmd() *cobra.Command {
 				MinQuantityTickSize:    minQuantityTickSize,
 				MinNotional:            minNotional,
 				OpenNotionalCap:        openNotionalCap,
+				CrossMarginEligible:    crossMarginEligible,
 			}
 
 			if err := msg.ValidateBasic(); err != nil {
@@ -1175,6 +1188,7 @@ func NewInstantPerpetualMarketLaunchTxCmd() *cobra.Command {
 	cmd.Flags().String(FlagMinQuantityTickSize, "0.01", "min quantity tick size")
 	cmd.Flags().String(FlagMinNotional, "0", "min notional")
 	cmd.Flags().String(FlagOpenNotionalCap, "uncapped", "open notional cap")
+	cmd.Flags().Bool(FlagCrossMarginEligible, false, "set if market is eligible for cross-margin")
 	cliflags.AddTxFlagsToCmd(cmd)
 	return cmd
 }
@@ -1730,6 +1744,11 @@ func NewInstantExpiryFuturesMarketLaunchTxCmd() *cobra.Command {
 				return err
 			}
 
+			crossMarginEligible, err := cmd.Flags().GetBool(FlagCrossMarginEligible)
+			if err != nil {
+				return err
+			}
+
 			msg := &exchangev2.MsgInstantExpiryFuturesMarketLaunch{
 				Sender:                 clientCtx.GetFromAddress().String(),
 				Ticker:                 ticker,
@@ -1748,6 +1767,7 @@ func NewInstantExpiryFuturesMarketLaunchTxCmd() *cobra.Command {
 				MinQuantityTickSize:    minQuantityTickSize,
 				MinNotional:            minNotional,
 				OpenNotionalCap:        openNotionalCap,
+				CrossMarginEligible:    crossMarginEligible,
 			}
 
 			if err := msg.ValidateBasic(); err != nil {
@@ -1774,6 +1794,7 @@ func NewInstantExpiryFuturesMarketLaunchTxCmd() *cobra.Command {
 	cmd.Flags().String(FlagMinQuantityTickSize, "0.01", "min quantity tick size")
 	cmd.Flags().String(FlagMinNotional, "0", "min notional")
 	cmd.Flags().String(FlagOpenNotionalCap, "uncapped", "open notional cap")
+	cmd.Flags().Bool(FlagCrossMarginEligible, false, "set if market is eligible for cross-margin")
 	cliflags.AddTxFlagsToCmd(cmd)
 	return cmd
 }
@@ -3541,6 +3562,128 @@ func NewMsgLiquidatePositionTxCmd() *cobra.Command {
 	return cmd
 }
 
+func NewMsgBatchLiquidatePositionsTxCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "batch-liquidate-positions <liquidations-json-or-file>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Liquidate multiple positions in one transaction",
+		Long: `Liquidate multiple positions in one transaction.
+
+		Example (inline array payload):
+		$ %s tx exchange batch-liquidate-positions \
+		'[{"subaccount_id":"0xf22dccace9d0610334f32637100cad2934528f81000000000000000000000000","market_id":"0x77261d2236f465ca70995043e4134897bcf8aee1262ba69d93ad819d5722cd6a"}]'
+
+		Example (JSON file payload):
+		$ %s tx exchange batch-liquidate-positions liquidations.json
+
+		Accepted JSON formats:
+		1) Array payload:
+		[
+		  {
+		    "subaccount_id": "<subaccount_id>",
+		    "market_id": "<market_id>",
+		    "order": { ... optional derivative order ... }
+		  }
+		]
+
+		2) Object payload:
+		{
+		  "liquidations": [ ... same array entries ... ]
+		}`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientCtx, err := client.GetClientTxContext(cmd)
+			if err != nil {
+				return err
+			}
+
+			payload, err := readBatchLiquidationsPayload(args[0])
+			if err != nil {
+				return err
+			}
+
+			msg := &exchangev2.MsgBatchLiquidatePositions{
+				Sender:       clientCtx.GetFromAddress().String(),
+				Liquidations: payload,
+			}
+
+			if err := msg.ValidateBasic(); err != nil {
+				return err
+			}
+
+			return tx.GenerateOrBroadcastTxCLI(clientCtx, cmd.Flags(), msg)
+		},
+	}
+
+	cliflags.AddTxFlagsToCmd(cmd)
+	return cmd
+}
+
+func checkNoTrailingJSON(dec *json.Decoder, format string) error {
+	var trailing json.RawMessage
+	switch err := dec.Decode(&trailing); {
+	case err == nil:
+		return fmt.Errorf("invalid batch liquidation payload (%s): unexpected trailing data", format)
+	case errors.Is(err, io.EOF):
+		return nil
+	default:
+		return fmt.Errorf("invalid batch liquidation payload (%s): unexpected trailing data: %w", format, err)
+	}
+}
+
+// loadPayloadBytes resolves raw JSON from either an inline string (leading '[' or '{')
+// or a file path.
+func loadPayloadBytes(input string) ([]byte, error) {
+	trimmed := strings.TrimSpace(input)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return []byte(trimmed), nil
+	}
+	b, err := os.ReadFile(input)
+	if err != nil {
+		return nil, err
+	}
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 {
+		return nil, errors.New("invalid batch liquidation payload: empty input")
+	}
+	return b, nil
+}
+
+func readBatchLiquidationsPayload(input string) ([]exchangev2.LiquidatePositionData, error) {
+	payloadBytes, err := loadPayloadBytes(input)
+	if err != nil {
+		return nil, err
+	}
+
+	switch payloadBytes[0] {
+	case '[':
+		dec := json.NewDecoder(bytes.NewReader(payloadBytes))
+		dec.DisallowUnknownFields()
+		var liquidations []exchangev2.LiquidatePositionData
+		if err := dec.Decode(&liquidations); err != nil {
+			return nil, fmt.Errorf("invalid batch liquidation payload (array): %w", err)
+		}
+		if err := checkNoTrailingJSON(dec, "array"); err != nil {
+			return nil, err
+		}
+		return liquidations, nil
+	case '{':
+		var request struct {
+			Liquidations []exchangev2.LiquidatePositionData `json:"liquidations"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(payloadBytes))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&request); err != nil {
+			return nil, fmt.Errorf(`invalid batch liquidation payload (object): %w (expected an object with a "liquidations" array, or a top-level array)`, err)
+		}
+		if err := checkNoTrailingJSON(dec, "object"); err != nil {
+			return nil, err
+		}
+		return request.Liquidations, nil
+	default:
+		return nil, errors.New("invalid batch liquidation payload: must start with '[' or '{'")
+	}
+}
+
 func NewActivatePostOnlyModeTxCmd() *cobra.Command {
 	cmd := cli.TxCmd(
 		"activate-post-only-mode",
@@ -3639,6 +3782,18 @@ func getDerivativeMarketParamUpdateFlagsMapping() cli.FlagsMapping {
 				}
 				return "1", nil
 			},
+		}, "CrossMarginEligibility": cli.Flag{
+			Flag: FlagCrossMarginEligible,
+			Transform: func(orig string, _ grpc.ClientConn) (any, error) {
+				b, err := strconv.ParseBool(orig)
+				if err != nil {
+					return nil, fmt.Errorf("invalid value for %s: %w", FlagCrossMarginEligible, err)
+				}
+				if b {
+					return "1", nil // CM_ELIGIBILITY_ELIGIBLE
+				}
+				return "2", nil // CM_ELIGIBILITY_INELIGIBLE
+			},
 		}, "Admin": cli.Flag{Flag: FlagAdmin},
 		"AdminPermissions": cli.Flag{Flag: FlagAdminPermissions},
 		"BaseDecimals":     cli.Flag{Flag: FlagBaseDecimals},
@@ -3670,6 +3825,7 @@ func setupDerivativeMarketParamUpdateFlags(cmd *cobra.Command) {
 	cmd.Flags().Uint32(FlagAdminPermissions, 0, "admin permissions level")
 	cmd.Flags().Bool(FlagExpedited, false, "set the expedited value for the governance proposal")
 	cmd.Flags().Bool(FlagHasDisabledMinimalProtocolFee, false, "set if market has disabled minimal protocol fee")
+	cmd.Flags().Bool(FlagCrossMarginEligible, false, "set cross-margin eligibility (true=eligible, false=ineligible)")
 
 	cliflags.AddGovProposalFlags(cmd)
 	cliflags.AddTxFlagsToCmd(cmd)
@@ -3689,6 +3845,19 @@ func createDerivativeMarketParamUpdateProposal(
 	err := cli.ParseFieldsFromFlagsAndArgs(proposal, flagsMapping, argsMapping, cmd.Flags(), args, clientCtx)
 	if err != nil {
 		return nil, err
+	}
+
+	// The nested structs above are preallocated so the flag parser can set
+	// sub-fields without nil-deref. If the user supplied no oracle/admin flags,
+	// collapse them back to nil — otherwise the proposal carries empty structs
+	// downstream, where a non-nil AdminInfo wipes the market admin and a
+	// non-nil OracleParams zeroes the oracle config (then fails insurance-fund
+	// oracle validation). Treat "all sub-fields still zero" as "no change".
+	if o := proposal.OracleParams; o != nil && o.OracleBase == "" && o.OracleQuote == "" && o.OracleType == 0 && o.OracleScaleFactor == 0 {
+		proposal.OracleParams = nil
+	}
+	if a := proposal.AdminInfo; a != nil && a.Admin == "" && a.AdminPermissions == 0 {
+		proposal.AdminInfo = nil
 	}
 
 	return proposal, nil

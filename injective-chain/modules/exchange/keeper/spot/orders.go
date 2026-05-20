@@ -42,17 +42,8 @@ func (k SpotKeeper) CreateSpotLimitOrder(
 		return orderHash, err
 	}
 
-	// 6. Reject if the subaccount's available deposits does not have at least the required funds for the trade
-	balanceHoldIncrement, marginDenom := order.GetBalanceHoldAndMarginDenom(market)
-	var chainFormattedBalanceHoldIncrement math.LegacyDec
-	if order.IsBuy() {
-		chainFormattedBalanceHoldIncrement = market.NotionalToChainFormat(balanceHoldIncrement)
-	} else {
-		chainFormattedBalanceHoldIncrement = market.QuantityToChainFormat(balanceHoldIncrement)
-	}
-
-	// 8. Decrement the available balance or bank by the funds amount needed to fund the order
-	if err := k.subaccount.ChargeAccount(ctx, subaccountID, marginDenom, chainFormattedBalanceHoldIncrement); err != nil {
+	// 6-8. Risk admission + funds reservation
+	if err := k.RiskEngine().ReserveSpotLimitOrder(ctx, k.subaccount, subaccountID, order, market); err != nil {
 		return orderHash, err
 	}
 
@@ -176,11 +167,9 @@ func (k SpotKeeper) CancelSpotLimitOrderByOrderHash(
 	}
 
 	if isTransient {
-		k.CancelTransientSpotLimitOrder(ctx, market, marketID, subaccountID, order)
-	} else {
-		k.CancelSpotLimitOrder(ctx, market, marketID, subaccountID, order.IsBuy(), order)
+		return k.CancelTransientSpotLimitOrder(ctx, market, marketID, subaccountID, order)
 	}
-	return nil
+	return k.CancelSpotLimitOrder(ctx, market, marketID, subaccountID, order.IsBuy(), order)
 }
 
 // GetSpotOrdersToCancelUpToAmount returns the spot orders to cancel up to a given amount
@@ -355,19 +344,31 @@ func (k SpotKeeper) CancelAllSpotLimitOrders(
 	transientSellOrders := k.GetAllTransientSpotLimitOrdersBySubaccountAndMarket(ctx, marketID, false, subaccountID)
 
 	for idx := range restingBuyOrders {
-		k.CancelSpotLimitOrder(ctx, market, marketID, subaccountID, true, restingBuyOrders[idx])
+		order := restingBuyOrders[idx]
+		if err := k.CancelSpotLimitOrder(ctx, market, marketID, subaccountID, true, order); err != nil {
+			events.Emit(ctx, k.BaseKeeper, v2.NewEventOrderCancelFail(marketID, subaccountID, order.Hash().Hex(), order.Cid(), err))
+		}
 	}
 
 	for idx := range restingSellOrders {
-		k.CancelSpotLimitOrder(ctx, market, marketID, subaccountID, false, restingSellOrders[idx])
+		order := restingSellOrders[idx]
+		if err := k.CancelSpotLimitOrder(ctx, market, marketID, subaccountID, false, order); err != nil {
+			events.Emit(ctx, k.BaseKeeper, v2.NewEventOrderCancelFail(marketID, subaccountID, order.Hash().Hex(), order.Cid(), err))
+		}
 	}
 
 	for idx := range transientBuyOrders {
-		k.CancelTransientSpotLimitOrder(ctx, market, marketID, subaccountID, transientBuyOrders[idx])
+		order := transientBuyOrders[idx]
+		if err := k.CancelTransientSpotLimitOrder(ctx, market, marketID, subaccountID, order); err != nil {
+			events.Emit(ctx, k.BaseKeeper, v2.NewEventOrderCancelFail(marketID, subaccountID, order.Hash().Hex(), order.Cid(), err))
+		}
 	}
 
 	for idx := range transientSellOrders {
-		k.CancelTransientSpotLimitOrder(ctx, market, marketID, subaccountID, transientSellOrders[idx])
+		order := transientSellOrders[idx]
+		if err := k.CancelTransientSpotLimitOrder(ctx, market, marketID, subaccountID, order); err != nil {
+			events.Emit(ctx, k.BaseKeeper, v2.NewEventOrderCancelFail(marketID, subaccountID, order.Hash().Hex(), order.Cid(), err))
+		}
 	}
 }
 
@@ -412,24 +413,20 @@ func (k SpotKeeper) CancelSpotLimitOrder(
 	subaccountID common.Hash,
 	isBuy bool,
 	order *v2.SpotLimitOrder,
-) {
+) error {
 	defer k.Meter(ctx).FuncTiming(&ctx, "CancelSpotLimitOrder")()
 
-	marginHold, marginDenom := order.GetUnfilledMarginHoldAndMarginDenom(market, false)
-	var chainFormattedMarginHold math.LegacyDec
-	if order.IsBuy() {
-		chainFormattedMarginHold = market.NotionalToChainFormat(marginHold)
-	} else {
-		chainFormattedMarginHold = market.QuantityToChainFormat(marginHold)
+	// Refund unfilled hold
+	if err := k.RiskEngine().RefundSpotLimitOrderCancel(ctx, k.subaccount, subaccountID, order, market, false); err != nil {
+		return err
 	}
-
-	k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, marginDenom, chainFormattedMarginHold)
 	k.RemoveSpotLimitOrder(ctx, marketID, isBuy, order)
 
 	events.Emit(ctx, k.BaseKeeper, &v2.EventCancelSpotOrder{
 		MarketId: marketID.Hex(),
 		Order:    *order,
 	})
+	return nil
 }
 
 // DeleteSpotLimitOrder deletes the SpotLimitOrder.
@@ -456,24 +453,134 @@ func (k SpotKeeper) CancelTransientSpotLimitOrder(
 	marketID common.Hash,
 	subaccountID common.Hash,
 	order *v2.SpotLimitOrder,
-) {
+) error {
 	defer k.Meter(ctx).FuncTiming(&ctx, "CancelTransientSpotLimitOrder")()
 
-	marginHold, marginDenom := order.GetUnfilledMarginHoldAndMarginDenom(market, true)
-	var chainFormattedMarginHold math.LegacyDec
-	if order.IsBuy() {
-		chainFormattedMarginHold = market.NotionalToChainFormat(marginHold)
-	} else {
-		chainFormattedMarginHold = market.QuantityToChainFormat(marginHold)
+	// Refund unfilled hold
+	if err := k.RiskEngine().RefundSpotLimitOrderCancel(ctx, k.subaccount, subaccountID, order, market, true); err != nil {
+		return err
 	}
-
-	k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, marginDenom, chainFormattedMarginHold)
 	k.DeleteTransientSpotLimitOrder(ctx, marketID, order)
 
 	events.Emit(ctx, k.BaseKeeper, &v2.EventCancelSpotOrder{
 		MarketId: marketID.Hex(),
 		Order:    *order,
 	})
+	return nil
+}
+
+// CancelAllTransientSpotLimitOrdersForMarket cancels all transient spot limit orders for a market,
+// refunding balance holds. Used for fail-closed cleanup when stage-3 FBA matching panics.
+func (k SpotKeeper) CancelAllTransientSpotLimitOrdersForMarket(
+	ctx sdk.Context,
+	market *v2.SpotMarket,
+) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "CancelAllTransientSpotLimitOrdersForMarket")()
+
+	marketID := market.MarketID()
+	buyOrders := k.GetAllTransientSpotLimitOrdersByMarketDirection(ctx, marketID, true)
+	sellOrders := k.GetAllTransientSpotLimitOrdersByMarketDirection(ctx, marketID, false)
+
+	for _, order := range buyOrders {
+		if err := k.CancelTransientSpotLimitOrder(ctx, market, marketID, order.SubaccountID(), order); err != nil {
+			k.Logger(ctx).Error(
+				"CancelTransientSpotLimitOrder for buyOrder failed during CancelAllTransientSpotLimitOrdersForMarket",
+				"orderHash", order.Hash().Hex(),
+				"err", err.Error(),
+			)
+			events.Emit(ctx, k.BaseKeeper, v2.NewEventOrderCancelFail(
+				marketID, order.SubaccountID(), order.Hash().Hex(), order.Cid(), err,
+			))
+		}
+	}
+
+	for _, order := range sellOrders {
+		if err := k.CancelTransientSpotLimitOrder(ctx, market, marketID, order.SubaccountID(), order); err != nil {
+			k.Logger(ctx).Error(
+				"CancelTransientSpotLimitOrder for sellOrder failed during CancelAllTransientSpotLimitOrdersForMarket",
+				"orderHash", order.Hash().Hex(),
+				"err", err.Error(),
+			)
+			events.Emit(ctx, k.BaseKeeper, v2.NewEventOrderCancelFail(
+				marketID, order.SubaccountID(), order.Hash().Hex(), order.Cid(), err,
+			))
+		}
+	}
+}
+
+// CancelTransientSpotMarketOrder cancels a transient spot market order, refunding its balance hold.
+// The refund mirrors ReserveSpotMarketOrder: buy orders held NotionalToChainFormat(BalanceHold) of
+// quote denom; sell orders held QuantityToChainFormat(BalanceHold) of base denom.
+//
+func (k SpotKeeper) CancelTransientSpotMarketOrder(
+	ctx sdk.Context,
+	market *v2.SpotMarket,
+	marketID common.Hash,
+	order *v2.SpotMarketOrder,
+) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "CancelTransientSpotMarketOrder")()
+
+	isBuy := order.IsBuy()
+
+	var chainFormattedRefund math.LegacyDec
+	var denom string
+	if isBuy {
+		chainFormattedRefund = market.NotionalToChainFormat(order.BalanceHold)
+		denom = market.QuoteDenom
+	} else {
+		chainFormattedRefund = market.QuantityToChainFormat(order.BalanceHold)
+		denom = market.BaseDenom
+	}
+
+	subaccountID := order.SubaccountID()
+	k.subaccount.IncrementAvailableBalanceOrBank(ctx, subaccountID, denom, chainFormattedRefund)
+	k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+	k.DeleteTransientSpotMarketOrder(ctx, marketID, isBuy, order)
+
+	ctx.Logger().Info("transient spot market order cancelled",
+		"market_id", marketID.Hex(),
+		"subaccount", subaccountID.Hex(),
+		"is_buy", isBuy,
+		"order_hash", common.BytesToHash(order.OrderHash).Hex(),
+	)
+}
+
+// CancelPausedTransientSpotOrders cancels and refunds all transient spot orders (limit and market)
+// belonging to cross-margin subaccounts under emergency pause. Must be called BEFORE FBA execution
+// to avoid store mutations during parallel matching that would stale derivative risk snapshots.
+func (k SpotKeeper) CancelPausedTransientSpotOrders(ctx sdk.Context) {
+	defer k.Meter(ctx).FuncTiming(&ctx, "CancelPausedTransientSpotOrders")()
+
+	// Early exit: skip the full market scan when emergency pause is not active.
+	if !k.GetParams(ctx).CrossMarginParams.EmergencyPaused {
+		return
+	}
+
+	markets := k.GetAllSpotMarkets(ctx)
+	for _, market := range markets {
+		marketID := market.MarketID()
+
+		for _, isBuy := range []bool{true, false} {
+			// Cancel paused transient market orders.
+			marketOrders := k.GetAllTransientSpotMarketOrders(ctx, marketID, isBuy)
+			for _, order := range marketOrders {
+				if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+					k.CancelTransientSpotMarketOrder(ctx, market, marketID, order)
+				}
+			}
+
+			// Cancel paused transient limit orders.
+			limitOrders := k.GetAllTransientSpotLimitOrdersByMarketDirection(ctx, marketID, isBuy)
+			for _, order := range limitOrders {
+				if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+					if cancelErr := k.CancelTransientSpotLimitOrder(ctx, market, marketID, order.SubaccountID(), order); cancelErr != nil {
+						ctx.Logger().Error("failed to cancel paused transient spot limit order",
+							"marketID", marketID.Hex(), "subaccount", order.SubaccountID().Hex(), "error", cancelErr)
+					}
+				}
+			}
+		}
+	}
 }
 
 // SaveNewSpotLimitOrder stores SpotLimitOrder and order index in keeper.
@@ -505,7 +612,9 @@ func (k SpotKeeper) SaveNewSpotLimitOrder(
 	k.SetCid(ctx, false, order.SubaccountID(), order.Cid(), marketID, isBuy, orderHash)
 }
 
-// GetBestSpotLimitOrderPrice returns the best price of the first limit order on the orderbook.
+// GetBestSpotLimitOrderPrice returns the best price of the first executable limit order
+// on the orderbook. During cross-margin emergency pause, orders from CM subaccounts are
+// skipped so that TOB pricing is consistent with the executable book.
 func (k SpotKeeper) GetBestSpotLimitOrderPrice(
 	ctx sdk.Context,
 	marketID common.Hash,
@@ -513,13 +622,18 @@ func (k SpotKeeper) GetBestSpotLimitOrderPrice(
 ) *math.LegacyDec {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetBestSpotLimitOrderPrice")()
 
+	emergencyPaused := k.GetParams(ctx).CrossMarginParams.EmergencyPaused
+
 	var bestOrder *v2.SpotLimitOrder
-	appendOrder := func(order *v2.SpotLimitOrder) (stop bool) {
+	k.IterateSpotLimitOrdersByMarketDirection(ctx, marketID, isBuy, func(order *v2.SpotLimitOrder) (stop bool) {
+		if emergencyPaused {
+			if err := k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+				return false // skip this order, continue iterating
+			}
+		}
 		bestOrder = order
 		return true
-	}
-
-	k.IterateSpotLimitOrdersByMarketDirection(ctx, marketID, isBuy, appendOrder)
+	})
 
 	var bestPrice *math.LegacyDec
 	if bestOrder != nil {

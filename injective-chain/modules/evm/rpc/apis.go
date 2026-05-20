@@ -3,11 +3,11 @@ package rpc
 import (
 	"fmt"
 
-	appconfig "github.com/InjectiveLabs/injective-core/cmd/injectived/config"
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/server"
 	"github.com/ethereum/go-ethereum/rpc"
 
+	appconfig "github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/rpc/backend"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/rpc/namespaces/ethereum/debug"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/evm/rpc/namespaces/ethereum/eth"

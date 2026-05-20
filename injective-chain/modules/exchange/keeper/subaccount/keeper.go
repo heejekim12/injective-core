@@ -515,6 +515,7 @@ func (k SubaccountKeeper) ExecuteWithdraw(ctx sdk.Context, msg *v2.MsgWithdraw) 
 		subaccountID        = types.MustGetSubaccountIDOrDeriveFromNonce(withdrawDestAddr, msg.SubaccountId)
 	)
 
+	// NOTE: Cross-margin maintenance checks are enforced at the message-server layer (before calling ExecuteWithdraw).
 	if !k.IsDenomValid(ctx, denom) {
 		return sdkerrors.ErrInvalidCoins
 	}

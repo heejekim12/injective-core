@@ -3,30 +3,15 @@ package keeper
 import (
 	"fmt"
 
-	"cosmossdk.io/errors"
 	"cosmossdk.io/math"
 	"cosmossdk.io/store/prefix"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/assistant/pricefeed"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
-
-type PriceFeederKeeper interface {
-	IsPriceFeedRelayer(ctx sdk.Context, oracleBase, oracleQuote string, relayer sdk.AccAddress) bool
-	GetAllPriceFeedStates(ctx sdk.Context) []*types.PriceFeedState
-	GetAllPriceFeedRelayers(ctx sdk.Context, baseQuoteHash common.Hash) []string
-	SetPriceFeedRelayer(ctx sdk.Context, oracleBase, oracleQuote string, relayer sdk.AccAddress)
-	SetPriceFeedRelayerFromBaseQuoteHash(ctx sdk.Context, baseQuoteHash common.Hash, relayer sdk.AccAddress)
-	DeletePriceFeedRelayer(ctx sdk.Context, oracleBase, oracleQuote string, relayer sdk.AccAddress)
-	HasPriceFeedInfo(ctx sdk.Context, priceFeedInfo *types.PriceFeedInfo) bool
-	GetPriceFeedInfo(ctx sdk.Context, baseQuoteHash common.Hash) *types.PriceFeedInfo
-	SetPriceFeedInfo(ctx sdk.Context, priceFeedInfo *types.PriceFeedInfo)
-	GetPriceFeedPriceState(ctx sdk.Context, base string, quote string) *types.PriceState
-	SetPriceFeedPriceState(ctx sdk.Context, oracleBase, oracleQuote string, priceState *types.PriceState)
-	GetPriceFeedPrice(ctx sdk.Context, base string, quote string) *math.LegacyDec
-	ProcessPriceFeedPrice(ctx sdk.Context, msg *types.MsgRelayPriceFeedPrice) error
-}
 
 // IsPriceFeedRelayer checks that the relayer has been authorized for the given oracle base and quote pair.
 func (k *Keeper) IsPriceFeedRelayer(ctx sdk.Context, oracleBase, oracleQuote string, relayer sdk.AccAddress) bool {
@@ -65,13 +50,10 @@ func (k *Keeper) GetAllPriceFeedStates(ctx sdk.Context) []*types.PriceFeedState 
 
 	priceFeedInfoStore := prefix.NewStore(store, types.PricefeedInfoKey)
 
-	iterator := priceFeedInfoStore.Iterator(nil, nil)
-	defer iterator.Close()
-
 	seenBaseQuoteHashes := make(map[common.Hash][]byte)
 
-	for ; iterator.Valid(); iterator.Next() {
-		baseQuoteHash := common.BytesToHash(iterator.Key())
+	chaintypes.IterateSafe(priceFeedInfoStore.Iterator(nil, nil), func(iterKey, _ []byte) bool {
+		baseQuoteHash := common.BytesToHash(iterKey)
 		if _, ok := seenBaseQuoteHashes[baseQuoteHash]; !ok {
 			seenBaseQuoteHashes[baseQuoteHash] = []byte{}
 			relayers := k.GetAllPriceFeedRelayers(ctx, baseQuoteHash)
@@ -84,7 +66,8 @@ func (k *Keeper) GetAllPriceFeedStates(ctx sdk.Context) []*types.PriceFeedState 
 				Relayers:   relayers,
 			})
 		}
-	}
+		return false
+	})
 
 	return priceFeedStates
 }
@@ -111,16 +94,10 @@ func (k *Keeper) IteratePriceFeedRelayers(ctx sdk.Context, baseQuoteHash common.
 
 	priceFeederStore := prefix.NewStore(store, types.GetPricefeedRelayerStorePrefix(baseQuoteHash))
 
-	iterator := priceFeederStore.Iterator(nil, nil)
-	defer iterator.Close()
-
-	for ; iterator.Valid(); iterator.Next() {
-		bz := iterator.Value()
+	chaintypes.IterateSafe(priceFeederStore.Iterator(nil, nil), func(_, bz []byte) bool {
 		relayer := sdk.AccAddress(bz)
-		if process(&relayer) {
-			return
-		}
-	}
+		return process(&relayer)
+	})
 }
 
 func (k *Keeper) HasPriceFeedInfo(ctx sdk.Context, priceFeedInfo *types.PriceFeedInfo) bool {
@@ -128,6 +105,20 @@ func (k *Keeper) HasPriceFeedInfo(ctx sdk.Context, priceFeedInfo *types.PriceFee
 
 	priceFeedInfoKey := types.GetPriceFeedInfoKey(priceFeedInfo)
 	return k.getStore(ctx).Has(priceFeedInfoKey)
+}
+
+func (k *Keeper) HasPriceFeedInfoByHash(ctx sdk.Context, h common.Hash) bool {
+	return k.getStore(ctx).Has(append(types.PricefeedInfoKey, h.Bytes()...))
+}
+
+func (k *Keeper) GetPriceFeedPriceStateByHash(ctx sdk.Context, h common.Hash) *types.PriceState {
+	bz := k.getStore(ctx).Get(types.GetPriceFeedPriceStoreKey(h))
+	if bz == nil {
+		return nil
+	}
+	var priceState types.PriceState
+	k.cdc.MustUnmarshal(bz, &priceState)
+	return &priceState
 }
 
 func (k *Keeper) GetPriceFeedInfo(ctx sdk.Context, baseQuoteHash common.Hash) *types.PriceFeedInfo {
@@ -188,57 +179,17 @@ func (k *Keeper) SetPriceFeedPriceState(ctx sdk.Context, oracleBase, oracleQuote
 func (k *Keeper) GetPriceFeedPrice(ctx sdk.Context, base, quote string) *math.LegacyDec {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetPriceFeedPrice")()
 
-	priceState := k.GetPriceFeedPriceState(ctx, base, quote)
-	if priceState == nil {
-		return nil
-	}
-
-	return &priceState.Price
+	return pricefeed.NewAssistant(k).ReferencePrice(ctx, base, quote)
 }
 
 func (k *Keeper) GetPriceFeedPriceFromBaseQuoteHash(ctx sdk.Context, baseQuoteHash common.Hash) math.LegacyDec {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetPriceFeedPriceFromBaseQuoteHash")()
 
-	var priceFeedPrice types.PriceFeedPrice
 	bz := k.getStore(ctx).Get(types.GetPriceFeedPriceStoreKey(baseQuoteHash))
-	k.cdc.MustUnmarshal(bz, &priceFeedPrice)
-
-	return priceFeedPrice.Price
-}
-
-func (k *Keeper) ProcessPriceFeedPrice(ctx sdk.Context, msg *types.MsgRelayPriceFeedPrice) error {
-	defer k.Meter(ctx).FuncTiming(&ctx, "ProcessPriceFeedPrice")()
-
-	relayer, _ := sdk.AccAddressFromBech32(msg.Sender)
-
-	for idx := range msg.Price {
-		base, quote, price := msg.Base[idx], msg.Quote[idx], msg.Price[idx]
-		if !k.IsPriceFeedRelayer(ctx, base, quote, relayer) {
-			return errors.Wrapf(types.ErrRelayerNotAuthorized, "base %s quote %s relayer %s", base, quote, relayer.String())
-		}
-
-		k.SetPriceFeedInfo(ctx, &types.PriceFeedInfo{Base: base, Quote: quote})
-		priceState := k.GetPriceFeedPriceState(ctx, base, quote)
-		blockTime := ctx.BlockTime().Unix()
-		if priceState == nil {
-			priceState = types.NewPriceState(price, blockTime)
-		} else {
-			// skip price update if the price changes beyond 100x or less than 1% of the last price
-			if types.CheckPriceFeedThreshold(priceState.Price, price) {
-				continue
-			}
-			priceState.UpdatePrice(price, blockTime)
-		}
-
-		k.SetPriceFeedPriceState(ctx, base, quote, priceState)
-
-		// nolint:errcheck //ignored on purpose
-		ctx.EventManager().EmitTypedEvent(&types.SetPriceFeedPriceEvent{
-			Relayer: msg.Sender,
-			Base:    base,
-			Quote:   quote,
-			Price:   price,
-		})
+	if bz == nil {
+		return math.LegacyZeroDec()
 	}
-	return nil
+	var priceState types.PriceState
+	k.cdc.MustUnmarshal(bz, &priceState)
+	return priceState.Price
 }

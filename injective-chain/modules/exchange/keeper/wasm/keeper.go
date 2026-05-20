@@ -3,6 +3,7 @@ package wasm
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"sort"
 
 	"cosmossdk.io/errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/derivative"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/events"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/subaccount"
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/risk"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 	wasmxtypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/wasmx/types"
@@ -247,6 +249,14 @@ func (k WasmKeeper) HandlePositionTransferAction(
 		return types.ErrPostOnlyMode.Wrap("position transfers are not allowed in post-only mode")
 	}
 
+	// Check cross-margin emergency pause for both sides of the transfer.
+	if err := k.derivative.RiskEngine().CheckCrossMarginEmergencyPause(ctx, action.SourceSubaccountID); err != nil {
+		return err
+	}
+	if err := k.derivative.RiskEngine().CheckCrossMarginEmergencyPause(ctx, action.DestinationSubaccountID); err != nil {
+		return err
+	}
+
 	m := k.derivative.GetDerivativeMarketInfo(ctx, action.MarketID, true)
 
 	var (
@@ -262,6 +272,28 @@ func (k WasmKeeper) HandlePositionTransferAction(
 	sourcePosition := k.GetPosition(ctx, action.MarketID, action.SourceSubaccountID)
 	destinationPosition := k.GetPosition(ctx, action.MarketID, action.DestinationSubaccountID)
 
+	// For cross-margin destinations, enforce eligibility (enabled denom, market type, active
+	// market cap) unless the transfer strictly reduces the destination's exposure. A transfer
+	// is strictly reducing when the destination has an opposite-side position AND the transferred
+	// quantity doesn't exceed it (no flip into new net exposure). This preserves wind-down paths
+	// while preventing position-flipping bypasses.
+	isStrictlyReducingForDest := destinationPosition != nil && !destinationPosition.Quantity.IsZero() &&
+		sourcePosition != nil && sourcePosition.IsLong != destinationPosition.IsLong &&
+		action.Quantity.LTE(destinationPosition.Quantity)
+	if !isStrictlyReducingForDest {
+		if err := k.ensureCrossMarginEligibility(ctx, action.DestinationSubaccountID, market, action.MarketID); err != nil {
+			return err
+		}
+	}
+
+	// Per-position margin checks must be skipped for cross-margin sides (position.Margin
+	// is accounting state — pool-level equity covers the position) but preserved for
+	// isolated sides in mixed-mode transfers.
+	sourceProfile, _ := k.derivative.RiskEngine().EffectiveProfile(ctx, action.SourceSubaccountID)
+	destProfile, _ := k.derivative.RiskEngine().EffectiveProfile(ctx, action.DestinationSubaccountID)
+	sourceIsCross := sourceProfile != nil && sourceProfile.Mode == v2.RiskMode_RISK_MODE_CROSS
+	destIsCross := destProfile != nil && destProfile.Mode == v2.RiskMode_RISK_MODE_CROSS
+
 	destinationPosition, err := preparePositionTransfer(
 		contractAddress,
 		origin,
@@ -271,6 +303,8 @@ func (k WasmKeeper) HandlePositionTransferAction(
 		funding,
 		market,
 		markPrice,
+		sourceIsCross,
+		destIsCross,
 	)
 	if err != nil {
 		return err
@@ -303,6 +337,26 @@ func (k WasmKeeper) HandlePositionTransferAction(
 	k.derivative.SavePosition(ctx, action.MarketID, action.DestinationSubaccountID, destinationPosition)
 
 	k.applyPositionTransferDeposits(ctx, action, market, payout, closeExecutionMargin, receiverTradingFee)
+
+	// Evict cached cross-pool snapshots for both sides — positions and deposits changed.
+	k.derivative.RiskEngine().EvictCrossPoolSnapshotCache(ctx, action.SourceSubaccountID)
+	k.derivative.RiskEngine().EvictCrossPoolSnapshotCache(ctx, action.DestinationSubaccountID)
+
+	// Verify cross-margin pool health for both sides after the transfer.
+	// Losing a profitable position can push the source pool below maintenance;
+	// receiving a thin-margin position can push the destination pool below maintenance.
+	if err := k.ensureCrossMarginPoolHealth(ctx, action.SourceSubaccountID, market.QuoteDenom, market.QuoteDecimals); err != nil {
+		return err
+	}
+	// Skip destination health check for strictly-reducing transfers. A reducing transfer
+	// nets the destination's opposite-side position, analogous to a reduce-only close in
+	// the normal FBA path which has no post-execution health requirement. Requiring full
+	// health restoration here would block legitimate wind-down flows for distressed pools.
+	if !isStrictlyReducingForDest {
+		if err := k.ensureCrossMarginPoolHealth(ctx, action.DestinationSubaccountID, market.QuoteDenom, market.QuoteDecimals); err != nil {
+			return err
+		}
+	}
 
 	k.applyOpenInterestDeltaIfNeeded(ctx, action.MarketID, oiDelta)
 
@@ -459,6 +513,13 @@ func (k WasmKeeper) HandleSyntheticTradeAction(
 	return k.processSyntheticTradeAction(ctx, contractAddress, summary.GetMarketIDs(), action)
 }
 
+// syntheticPoolKey identifies a cross-margin pool by (subaccount, quoteDenom). Used to
+// track which pools need post-batch health checks after synthetic trade execution.
+type syntheticPoolKey struct {
+	subaccountID common.Hash
+	quoteDenom   string
+}
+
 type syntheticEventKey struct {
 	marketID string
 	isBuy    bool
@@ -495,6 +556,14 @@ func (k WasmKeeper) processSyntheticTradeAction(
 
 	eventGroups := make(map[syntheticEventKey]*syntheticEventData)
 
+	// Track (subaccount, quoteDenom) pools that had at least one non-reducing trade.
+	// Only these need a post-batch health check — pools with exclusively reducing trades
+	// are analogous to reduce-only orders in the normal FBA path, which have no
+	// post-execution health requirement. Keyed per pool so that a non-reducing trade in
+	// one quote-denom pool does not cause a reducing-only unwind in another pool to be
+	// rejected.
+	nonReducingPools := make(map[syntheticPoolKey]struct{})
+
 	for _, trade := range trades {
 		result, err := k.applySyntheticTrade(
 			ctx,
@@ -510,6 +579,11 @@ func (k WasmKeeper) processSyntheticTradeAction(
 			return err
 		}
 
+		if !result.isStrictlyReducing {
+			m := markets[trade.MarketID]
+			nonReducingPools[syntheticPoolKey{subaccountID: trade.SubaccountID, quoteDenom: m.Market.QuoteDenom}] = struct{}{}
+		}
+
 		key := syntheticEventKey{marketID: result.marketID, isBuy: result.isBuy}
 		if _, exists := eventGroups[key]; !exists {
 			eventGroups[key] = &syntheticEventData{
@@ -523,6 +597,26 @@ func (k WasmKeeper) processSyntheticTradeAction(
 	// Transfer funds from the contract to exchange module to pay for the synthetic trades
 	coinsToTransfer := buildCoinsToTransfer(totalMarginAndFees)
 	if err := k.transferSyntheticTradeFunds(ctx, contractAddress, coinsToTransfer, totalFees); err != nil {
+		return err
+	}
+
+	// Evict cached cross-pool snapshots for all affected subaccounts — positions and
+	// deposits changed. Must happen before the health check so it builds fresh snapshots,
+	// and so later same-block operations don't reuse stale cached equity/OLR.
+	evictedSubaccounts := make(map[common.Hash]struct{})
+	for _, trade := range trades {
+		if _, done := evictedSubaccounts[trade.SubaccountID]; !done {
+			k.derivative.RiskEngine().EvictCrossPoolSnapshotCache(ctx, trade.SubaccountID)
+			evictedSubaccounts[trade.SubaccountID] = struct{}{}
+		}
+	}
+
+	// Verify cross-margin pool health for pools that had at least one non-reducing trade.
+	// Checked post-batch because synthetic trades come in matched pairs (user + contract)
+	// and the pool should be validated after both sides are applied. Pools with only
+	// reducing trades are skipped — they are unwinding exposure and must be allowed even
+	// if the pool remains distressed, matching the normal FBA path.
+	if err := k.ensureCrossMarginPoolHealthAfterSyntheticTrades(ctx, trades, markets, nonReducingPools); err != nil {
 		return err
 	}
 
@@ -618,8 +712,8 @@ func sortedSyntheticFundingVwapMarketIDs(vwapByMarket syntheticFundingVwapByMark
 		marketIDs = append(marketIDs, marketID)
 	}
 
-	sort.SliceStable(marketIDs, func(i, j int) bool {
-		return bytes.Compare(marketIDs[i].Bytes(), marketIDs[j].Bytes()) < 0
+	slices.SortStableFunc(marketIDs, func(a, b common.Hash) int {
+		return bytes.Compare(a.Bytes(), b.Bytes())
 	})
 
 	return marketIDs
@@ -680,6 +774,7 @@ func preparePositionTransfer(
 	funding *v2.PerpetualMarketFunding,
 	market *v2.DerivativeMarket,
 	markPrice math.LegacyDec,
+	sourceIsCross, destIsCross bool,
 ) (*v2.Position, error) {
 	if err := ensurePositionTransferParties(contractAddress, origin, action.SourceSubaccountID, action.DestinationSubaccountID); err != nil {
 		return nil, err
@@ -697,12 +792,19 @@ func preparePositionTransfer(
 		sourcePosition.ApplyFunding(funding)
 	}
 
-	// Enforce each position's effectiveMargin / (markPrice * quantity) ≥ maintenanceMarginRatio
-	if err := ensurePositionAboveMaintenanceMarginRatio(sourcePosition, market, markPrice); err != nil {
-		return nil, err
+	// For cross-margin subaccounts, per-position margin is accounting state — pool-level
+	// equity covers the position. Skip the per-position check for CM sides; the caller runs
+	// ensureCrossMarginPoolHealth which validates solvency at the pool level. Isolated sides
+	// must still pass the per-position maintenance margin check.
+	if !sourceIsCross {
+		if err := ensurePositionAboveMaintenanceMarginRatio(sourcePosition, market, markPrice); err != nil {
+			return nil, err
+		}
 	}
-	if err := ensurePositionAboveMaintenanceMarginRatio(destinationPosition, market, markPrice); err != nil {
-		return nil, err
+	if !destIsCross {
+		if err := ensurePositionAboveMaintenanceMarginRatio(destinationPosition, market, markPrice); err != nil {
+			return nil, err
+		}
 	}
 
 	return destinationPosition, nil
@@ -901,10 +1003,11 @@ func (k WasmKeeper) initSyntheticTradeState(
 }
 
 type syntheticTradeResult struct {
-	marketID          string
-	isBuy             bool
-	cumulativeFunding *math.LegacyDec
-	tradeLog          *v2.DerivativeTradeLog
+	marketID           string
+	isBuy              bool
+	cumulativeFunding  *math.LegacyDec
+	tradeLog           *v2.DerivativeTradeLog
+	isStrictlyReducing bool
 }
 
 func (k WasmKeeper) applySyntheticTrade(
@@ -928,8 +1031,28 @@ func (k WasmKeeper) applySyntheticTrade(
 		fundingInfo = m.Funding
 	}
 
+	// Check cross-margin emergency pause before modifying positions.
+	if err := k.derivative.RiskEngine().CheckCrossMarginEmergencyPause(ctx, trade.SubaccountID); err != nil {
+		return nil, err
+	}
+
 	// Initialize position and apply funding
 	position := k.GetPosition(ctx, trade.MarketID, trade.SubaccountID)
+
+	// For cross-margin subaccounts, enforce eligibility (enabled denom, market type, active
+	// market cap) unless the trade strictly reduces exposure. A trade is strictly reducing
+	// only when it closes an existing opposite-side position without exceeding its size.
+	// Note: trade.IsReduceOnly() (margin==0) alone is NOT sufficient — a zero-margin trade
+	// on a fresh or same-side position would bypass eligibility and pool health checks.
+	isOppositeAndWithinPosition := position != nil && !position.Quantity.IsZero() &&
+		trade.IsBuy != position.IsLong && trade.Quantity.LTE(position.Quantity)
+	isStrictlyReducing := isOppositeAndWithinPosition
+	if !isStrictlyReducing {
+		if err := k.ensureCrossMarginEligibility(ctx, trade.SubaccountID, market, trade.MarketID); err != nil {
+			return nil, err
+		}
+	}
+
 	position = initSyntheticTradePosition(position, trade.IsBuy, fundingInfo)
 
 	cs := caps[trade.MarketID]
@@ -977,8 +1100,19 @@ func (k WasmKeeper) applySyntheticTrade(
 	}
 	payout, closeExecutionMargin, collateralizationMargin, pnl := position.ApplyPositionDelta(positionDelta, tradingFee)
 
-	if err := ensureSyntheticTradePositionPostDelta(position, market, markPrice); err != nil {
-		return nil, err
+	// For cross-margin subaccounts, skip the per-position IM check. In CM, position.Margin
+	// is accounting state — pool-level equity covers the position. The post-batch
+	// ensureCrossMarginPoolHealth validates solvency at the pool level.
+	profile, _ := k.derivative.RiskEngine().EffectiveProfile(ctx, trade.SubaccountID)
+	isCross := profile != nil && profile.Mode == v2.RiskMode_RISK_MODE_CROSS
+	if isCross {
+		if position.Quantity.IsNegative() {
+			return nil, types.ErrNegativePositionQuantity
+		}
+	} else {
+		if err := ensureSyntheticTradePositionPostDelta(position, market, markPrice); err != nil {
+			return nil, err
+		}
 	}
 
 	updateCapsAfterTrade(cs, orderType, trade.Quantity, markPrice, trade.SubaccountID)
@@ -1034,10 +1168,11 @@ func (k WasmKeeper) applySyntheticTrade(
 	}
 
 	return &syntheticTradeResult{
-		marketID:          market.MarketId,
-		isBuy:             trade.IsBuy,
-		cumulativeFunding: cumulativeFunding,
-		tradeLog:          tradeLog,
+		marketID:           market.MarketId,
+		isBuy:              trade.IsBuy,
+		cumulativeFunding:  cumulativeFunding,
+		tradeLog:           tradeLog,
+		isStrictlyReducing: isStrictlyReducing,
 	}, nil
 }
 
@@ -1138,9 +1273,9 @@ func updateCapsAfterTrade(
 		markPrice,
 		cs.posQty[subaccountID],
 	)
-	cs.openInterestDelta = cs.openInterestDelta.Add(qtyDelta)
+	cs.openInterestDelta.AddMut(qtyDelta)
 	cs.posQty[subaccountID] = newPositionQuantity
-	cs.addedOpenNotional = cs.addedOpenNotional.Add(notionalDelta)
+	cs.addedOpenNotional.AddMut(notionalDelta)
 }
 
 func (k WasmKeeper) ensureAndApplySyntheticTradeMarketBalanceDelta(
@@ -1239,6 +1374,180 @@ func ensurePositionAboveInitialMarginRatio(
 		return errors.Wrapf(
 			types.ErrLowPositionMargin,
 			"position margin ratio %s ≥ %s must hold", positionMarginRatio.String(), market.InitialMarginRatio.String(),
+		)
+	}
+
+	return nil
+}
+
+// ensureCrossMarginEligibility checks whether a market is eligible for cross-margin trading
+// for the given subaccount. Returns nil if the subaccount is not in cross-margin mode.
+func (k WasmKeeper) ensureCrossMarginEligibility(
+	ctx sdk.Context,
+	subaccountID common.Hash,
+	market *v2.DerivativeMarket,
+	marketID common.Hash,
+) error {
+	profile, _ := k.derivative.RiskEngine().EffectiveProfile(ctx, subaccountID)
+	if profile == nil || profile.Mode != v2.RiskMode_RISK_MODE_CROSS {
+		return nil
+	}
+
+	if err := k.derivative.RiskEngine().CheckCrossMarginMarketEligibility(ctx, market); err != nil {
+		return err
+	}
+
+	return k.checkCrossMarginActiveMarketCap(ctx, subaccountID, market, marketID)
+}
+
+func (k WasmKeeper) checkCrossMarginActiveMarketCap(
+	ctx sdk.Context,
+	subaccountID common.Hash,
+	market *v2.DerivativeMarket,
+	marketID common.Hash,
+) error {
+	maxActive := k.GetParams(ctx).CrossMarginParams.MaxActiveDerivativeMarketsPerPool
+	if maxActive == 0 {
+		maxActive = 100
+	}
+
+	activeMarketIDs := risk.MergeAndSortMarketIDs(
+		k.GetActiveDerivativeMarketsBySubaccount(ctx, subaccountID),
+		k.GetActiveDerivativeOrderMarketsBySubaccount(ctx, subaccountID),
+		k.liveTransientDerivativeOrderMarkets(ctx, subaccountID),
+	)
+	activeCount := uint32(0)
+	hasMarket := false
+	for _, id := range activeMarketIDs {
+		if id == marketID {
+			hasMarket = true
+		}
+		m := k.GetDerivativeMarketByID(ctx, id)
+		if m == nil || m.GetMarketType().IsBinaryOptions() || m.QuoteDenom != market.QuoteDenom {
+			continue
+		}
+		activeCount++
+	}
+	if !hasMarket && activeCount >= maxActive {
+		return errors.Wrapf(types.ErrFeatureDisabled,
+			"cross-margin pool %s would exceed max active markets (%d)", market.QuoteDenom, maxActive)
+	}
+	return nil
+}
+
+// liveTransientDerivativeOrderMarkets returns the subset of transient derivative order
+// indicator markets that still have at least one live order. Mirrors the core risk engine's
+// crossMarginModel.liveTransientDerivativeOrderMarkets to avoid counting stale indicators
+// from cancelled/filled same-block orders.
+func (k WasmKeeper) liveTransientDerivativeOrderMarkets(ctx sdk.Context, subaccountID common.Hash) []common.Hash {
+	candidates := k.GetTransientDerivativeOrderIndicatorMarketsBySubaccount(ctx, subaccountID)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	live := make([]common.Hash, 0, len(candidates))
+	for _, marketID := range candidates {
+		if k.hasLiveTransientDerivativeOrder(ctx, marketID, subaccountID) {
+			live = append(live, marketID)
+		}
+	}
+	return live
+}
+
+func (k WasmKeeper) hasLiveTransientDerivativeOrder(ctx sdk.Context, marketID, subaccountID common.Hash) bool {
+	found := false
+	for _, isBuy := range []bool{true, false} {
+		if found {
+			break
+		}
+		k.IterateTransientDerivativeLimitOrdersBySubaccount(ctx, marketID, isBuy, subaccountID, func(_ *v2.DerivativeLimitOrder) (stop bool) {
+			found = true
+			return true
+		})
+	}
+	for _, isBuy := range []bool{true, false} {
+		if found {
+			break
+		}
+		found = k.HasTransientDerivativeMarketOrderForSubaccount(ctx, marketID, subaccountID, isBuy)
+	}
+	return found
+}
+
+// ensureCrossMarginPoolHealthAfterSyntheticTrades checks pool health for each unique
+// (subaccount, quoteDenom) pool affected by the synthetic trade batch that had at least
+// one non-reducing trade. Pools with exclusively reducing trades are skipped to allow
+// wind-down flows for distressed accounts, matching the normal FBA reduce-only path.
+func (k WasmKeeper) ensureCrossMarginPoolHealthAfterSyntheticTrades(
+	ctx sdk.Context,
+	trades []*types.SyntheticTrade,
+	markets map[common.Hash]*v2.DerivativeMarketInfo,
+	nonReducingPools map[syntheticPoolKey]struct{},
+) error {
+	checked := make(map[syntheticPoolKey]struct{})
+
+	for _, trade := range trades {
+		m := markets[trade.MarketID]
+		key := syntheticPoolKey{subaccountID: trade.SubaccountID, quoteDenom: m.Market.QuoteDenom}
+
+		// Skip pools that only had reducing trades.
+		if _, needsCheck := nonReducingPools[key]; !needsCheck {
+			continue
+		}
+
+		if _, done := checked[key]; done {
+			continue
+		}
+		checked[key] = struct{}{}
+
+		if err := k.ensureCrossMarginPoolHealth(ctx, trade.SubaccountID, m.Market.QuoteDenom, m.Market.QuoteDecimals); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ensureCrossMarginPoolHealth verifies that a cross-margin subaccount's pool remains above
+// both maintenance margin and order-lock requirement after a state change.
+// Returns nil for non-CM subaccounts.
+func (k WasmKeeper) ensureCrossMarginPoolHealth(
+	ctx sdk.Context,
+	subaccountID common.Hash,
+	quoteDenom string,
+	quoteDecimals uint32,
+) error {
+	profile, _ := k.derivative.RiskEngine().EffectiveProfile(ctx, subaccountID)
+	if profile == nil || profile.Mode != v2.RiskMode_RISK_MODE_CROSS {
+		return nil
+	}
+
+	snapshot, err := k.derivative.RiskEngine().BuildCrossPoolSnapshot(ctx, subaccountID, quoteDenom, quoteDecimals)
+	if err != nil {
+		return errors.Wrap(err, "failed to build cross-margin snapshot for pool health check")
+	}
+
+	if snapshot.MaintenanceMarginTotal.IsPositive() {
+		if snapshot.EquityLiquidation.LT(snapshot.MaintenanceMarginTotal) {
+			return errors.Wrapf(
+				types.ErrInsufficientMargin,
+				"cross-margin pool %s maintenance check failed: equity %s < maintenance %s",
+				quoteDenom,
+				snapshot.EquityLiquidation.String(),
+				snapshot.MaintenanceMarginTotal.String(),
+			)
+		}
+	}
+
+	// Check order-lock admission: changing positions can alter worst-case exposure for
+	// resting orders, so equity_admission must still cover the order lock requirement.
+	if snapshot.EquityAdmission.LT(snapshot.OrderLockRequirement) {
+		return errors.Wrapf(
+			types.ErrInsufficientMargin,
+			"cross-margin pool %s admission check failed: equity_admission %s < order_lock %s",
+			quoteDenom,
+			snapshot.EquityAdmission.String(),
+			snapshot.OrderLockRequirement.String(),
 		)
 	}
 

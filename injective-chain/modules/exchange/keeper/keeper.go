@@ -33,6 +33,9 @@ import (
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/subaccount"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/utils"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/wasm"
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/risk"
+	_ "github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/risk/cross"    // registers cross-margin model factory
+	_ "github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/risk/isolated" // registers isolated-margin model factory
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 )
@@ -64,6 +67,9 @@ type Keeper struct {
 
 	// cached value from params (false by default)
 	fixedGas bool
+
+	// riskEngine handles risk-sensitive admission, matching-time pruning, and liquidation checks.
+	riskEngine *risk.Engine
 }
 
 // NewKeeper creates new instances of the exchange Keeper
@@ -84,18 +90,31 @@ func NewKeeper(
 ) *Keeper {
 	var (
 		b            = base.NewBaseKeeper(cdc, storeKey, tStoreKey, objectStoreKey)
+		riskEngine   = risk.New(b)
 		subacc       = subaccount.New(b, ak, bk, pk)
 		feeDiscounts = feediscounts.New(b, sk)
 		trade        = rewards.New(b, bk, feeDiscounts, dk)
-		derv         = derivative.New(b, subacc, ok, feeDiscounts, bk, ik, trade, pk)
+		derv         = derivative.New(b, riskEngine, subacc, ok, feeDiscounts, bk, ik, trade, pk)
 	)
+
+	// Wire cross-margin snapshot dependencies into the risk engine.
+	riskEngine.SetCrossMarginDeps(riskCrossDeps{
+		base:       b,
+		derivative: derv,
+	})
+	riskEngine.SetParamsProvider(b)
+
+	// Fail fast if risk engine wiring is incomplete.
+	if err := riskEngine.EnsureWired(); err != nil {
+		panic(err)
+	}
 
 	return &Keeper{
 		BaseKeeper:          b,
 		SubaccountKeeper:    subacc,
 		BinaryOptionsKeeper: binaryoptions.New(b, derv, subacc, ok, ak, trade, feeDiscounts),
 		DerivativeKeeper:    derv,
-		SpotKeeper:          spot.New(b, bk, subacc, trade, feeDiscounts),
+		SpotKeeper:          spot.New(b, riskEngine, bk, subacc, trade, feeDiscounts),
 		FeeDiscountsKeeper:  feeDiscounts,
 		TradingKeeper:       trade,
 
@@ -107,7 +126,12 @@ func NewKeeper(
 		bankKeeper:         bk,
 		authority:          authority,
 		fixedGas:           false,
+		riskEngine:         riskEngine,
 	}
+}
+
+func (k *Keeper) RiskEngine() risk.ReadOnlyEngine {
+	return k.riskEngine
 }
 
 func (k *Keeper) SetGovKeeper(gk govkeeper.Keeper) {
@@ -859,6 +883,15 @@ func (k *Keeper) processDerivativeOrderCreation(
 	defer k.Meter(ctx).FuncTiming(&ctx, "processDerivativeOrderCreation")()
 
 	if orderHash, err := orderCreator(ctx, sender, derivativeOrder, market, markPrice); err != nil {
+		// Evict cross-margin snapshot cache for this subaccount on failure.
+		// ReserveDerivativeOrderMargin (inside EnsureValidDerivativeOrder) may have updated
+		// the cached OLR before the order failed at a later stage (e.g. atomic access check,
+		// atomic execution). Without eviction, subsequent orders in the same batch would see
+		// an inflated OLR and may be incorrectly rejected. This is a no-op for isolated
+		// margin accounts or when there is no cached snapshot.
+		subaccountID := types.MustGetSubaccountIDOrDeriveFromNonce(sender, derivativeOrder.OrderInfo.SubaccountId)
+		k.RiskEngine().EvictCrossPoolSnapshotCache(ctx, subaccountID)
+
 		sdkerror := &sdkerrors.Error{}
 		if errors.As(err, &sdkerror) {
 			derivativeOrderHashes[idx] = fmt.Sprintf("%d", sdkerror.ABCICode())

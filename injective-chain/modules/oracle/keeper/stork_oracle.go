@@ -1,54 +1,23 @@
 package keeper
 
 import (
-	"sort"
-
-	"cosmossdk.io/math"
 	"cosmossdk.io/store/prefix"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/assistant/stork"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 
-type StorkKeeper interface {
-	GetStorkPrice(ctx sdk.Context, base string, quote string) *math.LegacyDec
-	IsStorkPublisher(ctx sdk.Context, address string) bool
-	SetStorkPublisher(ctx sdk.Context, address string)
-	DeleteStorkPublisher(ctx sdk.Context, address string)
-	GetAllStorkPublishers(ctx sdk.Context) []string
-
-	SetStorkPriceState(ctx sdk.Context, priceData *types.StorkPriceState)
-	GetStorkPriceState(ctx sdk.Context, symbol string) types.StorkPriceState
-	GetAllStorkPriceStates(ctx sdk.Context) []*types.StorkPriceState
-}
-
-// GetStorkPrice gets price for a given base quote pair.
-func (k *Keeper) GetStorkPrice(ctx sdk.Context, base, quote string) *math.LegacyDec {
-	defer k.Meter(ctx).FuncTiming(&ctx, "GetStorkPrice")()
-
-	basePriceState := k.GetStorkPriceState(ctx, base)
-	if basePriceState == nil {
-		return nil
+// EmitStorkPricesUpdated emits a typed event for updated Stork price states.
+func (k *Keeper) EmitStorkPricesUpdated(ctx sdk.Context, states []*types.StorkPriceState) {
+	if len(states) == 0 {
+		return
 	}
-	if quote == types.QuoteUSD {
-		return &basePriceState.PriceState.Price
-	}
-
-	quotePriceState := k.GetStorkPriceState(ctx, quote)
-	if quotePriceState == nil {
-		return nil
-	}
-
-	basePrice := basePriceState.PriceState.Price
-	quotePrice := quotePriceState.PriceState.Price
-
-	if basePrice.IsNil() || quotePrice.IsNil() || !basePrice.IsPositive() || !quotePrice.IsPositive() {
-		return nil
-	}
-
-	price := basePrice.Quo(quotePrice)
-	return &price
+	defer k.Meter(ctx).FuncTiming(&ctx, "EmitStorkPricesUpdated")()
+	// nolint:errcheck //ignored on purpose
+	ctx.EventManager().EmitTypedEvent(&types.EventSetStorkPrices{Prices: states})
 }
 
 // SetStorkPriceState stores a given stork price state.
@@ -56,7 +25,9 @@ func (k *Keeper) SetStorkPriceState(ctx sdk.Context, priceData *types.StorkPrice
 	defer k.Meter(ctx).FuncTiming(&ctx, "SetStorkPriceState")()
 
 	priceKey := types.GetStorkPriceStoreKey(priceData.Symbol)
-	bz := k.cdc.MustMarshal(priceData)
+	toStore := *priceData
+	toStore.Symbol = ""
+	bz := k.cdc.MustMarshal(&toStore)
 
 	k.getStore(ctx).Set(priceKey, bz)
 
@@ -76,6 +47,7 @@ func (k *Keeper) GetStorkPriceState(ctx sdk.Context, symbol string) *types.Stork
 	}
 
 	k.cdc.MustUnmarshal(bz, &priceState)
+	priceState.Symbol = symbol
 	return &priceState
 }
 
@@ -88,14 +60,13 @@ func (k *Keeper) GetAllStorkPriceStates(ctx sdk.Context) []*types.StorkPriceStat
 
 	priceStore := prefix.NewStore(store, types.StorkPriceKey)
 
-	iter := priceStore.Iterator(nil, nil)
-	defer iter.Close()
-
-	for ; iter.Valid(); iter.Next() {
-		var priceData types.StorkPriceState
-		k.cdc.MustUnmarshal(iter.Value(), &priceData)
-		priceStates = append(priceStates, &priceData)
-	}
+	chaintypes.IterateSafe(priceStore.Iterator(nil, nil), func(iterKey, iterVal []byte) bool {
+		pd := new(types.StorkPriceState)
+		k.cdc.MustUnmarshal(iterVal, pd)
+		pd.Symbol = string(iterKey)
+		priceStates = append(priceStates, pd)
+		return false
+	})
 
 	return priceStates
 }
@@ -129,12 +100,10 @@ func (k *Keeper) GetAllStorkPublishers(ctx sdk.Context) []string {
 
 	publisherStore := prefix.NewStore(store, types.StorkPublisherKey)
 
-	iterator := publisherStore.Iterator(nil, nil)
-	defer iterator.Close()
-
-	for ; iterator.Valid(); iterator.Next() {
-		publishers = append(publishers, common.BytesToAddress(iterator.Key()).Hex())
-	}
+	chaintypes.IterateKeysSafe(publisherStore.Iterator(nil, nil), func(iterKey []byte) bool {
+		publishers = append(publishers, common.BytesToAddress(iterKey).Hex())
+		return false
+	})
 
 	return publishers
 }
@@ -148,95 +117,8 @@ func (k *Keeper) IsStorkPublisher(ctx sdk.Context, address string) bool {
 	return storkPublisherStore.Has(common.HexToAddress(address).Bytes())
 }
 
-type publisherTimestampKey struct {
-	addr common.Address
-	ts   uint64
-}
-
 func (k *Keeper) ProcessStorkAssetPairsData(ctx sdk.Context, assetPairs []*types.AssetPair) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "ProcessStorkAssetPairsData")()
 
-	storkPriceStates := make([]*types.StorkPriceState, 0, len(assetPairs))
-	for idx := range assetPairs {
-		pair := assetPairs[idx]
-		legalSignedPrices := make([]*types.SignedPriceOfAssetPair, 0, len(pair.SignedPrices))
-
-		seen := make(map[publisherTimestampKey]struct{}, len(pair.SignedPrices))
-		latestTimestamp := uint64(0)
-		for i := range pair.SignedPrices {
-			signedPrice := pair.SignedPrices[i]
-			timestamp := types.ConvertTimestampToNanoSecond(signedPrice.Timestamp)
-			if !k.IsStorkPublisher(ctx, signedPrice.PublisherKey) {
-				continue
-			}
-
-			key := publisherTimestampKey{addr: common.HexToAddress(signedPrice.PublisherKey), ts: signedPrice.Timestamp}
-			if _, alreadySeen := seen[key]; alreadySeen {
-				continue
-			}
-			seen[key] = struct{}{}
-
-			legalSignedPrices = append(legalSignedPrices, signedPrice)
-			if timestamp > latestTimestamp {
-				latestTimestamp = timestamp
-			}
-		}
-		// check if we have at least a valid signed price
-		if len(legalSignedPrices) == 0 {
-			k.Logger(ctx).Error("asset id %s doesn't have at least a valid signed price", pair.AssetId)
-			continue
-		}
-		storkPriceState := k.GetStorkPriceState(ctx, pair.AssetId)
-		price := getScaledMedianPriceFromValidSignedPrices(legalSignedPrices)
-
-		// don't update prices with an older price
-		if storkPriceState != nil && types.ConvertTimestampToNanoSecond(storkPriceState.Timestamp) >= latestTimestamp {
-			continue
-		}
-
-		// skip price update if the price changes beyond 100x or less than 1% of the last price
-		if storkPriceState != nil && types.CheckPriceFeedThreshold(storkPriceState.PriceState.Price, price) {
-			continue
-		}
-
-		blockTime := ctx.BlockTime().Unix()
-
-		if storkPriceState == nil {
-			storkPriceState = types.NewStorkPriceState(price, latestTimestamp, pair.AssetId, blockTime)
-		} else {
-			storkPriceState.Update(price, latestTimestamp, blockTime)
-		}
-
-		k.SetStorkPriceState(ctx, storkPriceState)
-
-		storkPriceStates = append(storkPriceStates, storkPriceState)
-	}
-
-	if len(storkPriceStates) > 0 {
-		// nolint:errcheck //ignored on purpose
-		ctx.EventManager().EmitTypedEvent(&types.EventSetStorkPrices{
-			Prices: storkPriceStates,
-		})
-	}
-}
-
-func getScaledMedianPriceFromValidSignedPrices(legalSigned []*types.SignedPriceOfAssetPair) math.LegacyDec {
-	listPrices := make([]math.LegacyDec, 0, len(legalSigned))
-	for idx := range legalSigned {
-		listPrices = append(listPrices, legalSigned[idx].Price)
-	}
-
-	sort.SliceStable(listPrices, func(i, j int) bool {
-		return listPrices[i].LT(listPrices[j])
-	})
-
-	unscaledMedianPrice := listPrices[len(listPrices)/2]
-
-	// get arithmetic median if cardinality is even
-	if len(listPrices)%2 == 0 {
-		unscaledMedianPrice = unscaledMedianPrice.Add(listPrices[len(listPrices)/2-1]).Quo(math.LegacyNewDec(2))
-	}
-
-	scaledPrice := types.ScaleStorkPrice(unscaledMedianPrice)
-	return scaledPrice
+	stork.NewAssistant(k).ProcessAssetPairsData(ctx, assetPairs)
 }

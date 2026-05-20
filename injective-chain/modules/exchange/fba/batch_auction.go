@@ -1,6 +1,8 @@
 package fba
 
 import (
+	"fmt"
+	"runtime/debug"
 	"sync"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -8,24 +10,76 @@ import (
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/derivative"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/keeper/spot"
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/risk"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 )
+
+// recoverFBAGoroutine catches panics inside FBA matching goroutines so that a panic in one
+// market does not crash the entire node. The result slice entry stays nil, which downstream
+// persistence code already skips. The panic is logged with a full stack trace.
+func recoverFBAGoroutine(ctx sdk.Context, funcName, marketID string) {
+	if r := recover(); r != nil {
+		ctx.Logger().Error(fmt.Sprintf("FBA goroutine panicked in %s for market %s: %v", funcName, marketID, r))
+		ctx.Logger().Error(string(debug.Stack()))
+	}
+}
+
+// RiskPrepassBuilder computes a stage-scoped risk prepass for derivative matching.
+// It materialises effective profiles and caches cross-pool snapshots for the
+// canonical touched subaccount set.
+type RiskPrepassBuilder func(ctx sdk.Context, stageMarketIDs []common.Hash) *risk.PrepassResult
 
 // BatchAuction coordinates FBA (Frequent Batch Auction) execution across all markets.
 // It handles both market orders (which match against resting limit orders) and
 // limit orders (which match against each other in a batch auction).
 type BatchAuction struct {
-	spotKeeper       spot.SpotKeeper
-	derivativeKeeper derivative.DerivativeKeeper
+	spotKeeper         spot.SpotKeeper
+	derivativeKeeper   derivative.DerivativeKeeper
+	riskPrepassBuilder RiskPrepassBuilder
 }
 
 // NewBatchAuction creates a new batch auction coordinator.
-func NewBatchAuction(spotKeeper spot.SpotKeeper, derivativeKeeper derivative.DerivativeKeeper) *BatchAuction {
+func NewBatchAuction(
+	spotKeeper spot.SpotKeeper,
+	derivativeKeeper derivative.DerivativeKeeper,
+	riskPrepassBuilder RiskPrepassBuilder,
+) *BatchAuction {
 	return &BatchAuction{
-		spotKeeper:       spotKeeper,
-		derivativeKeeper: derivativeKeeper,
+		spotKeeper:         spotKeeper,
+		derivativeKeeper:   derivativeKeeper,
+		riskPrepassBuilder: riskPrepassBuilder,
 	}
+}
+
+// buildStageRiskContext builds the stage-scoped risk prepass from the derivative
+// directions that will participate in this matching stage, and injects it into ctx.
+// This pairs spec stages 2+3 and 7+8: prepass is integral to the FBA stage.
+func (ba *BatchAuction) buildStageRiskContext(
+	ctx sdk.Context,
+	derivativeDirections []*types.MatchedMarketDirection,
+) sdk.Context {
+	defer ba.spotKeeper.Meter(ctx).FuncTiming(&ctx, "BatchAuction.buildStageRiskContext")()
+
+	if ba.riskPrepassBuilder == nil || len(derivativeDirections) == 0 {
+		return ctx
+	}
+
+	seen := make(map[common.Hash]struct{}, len(derivativeDirections))
+	stageMarketIDs := make([]common.Hash, 0, len(derivativeDirections))
+	for _, d := range derivativeDirections {
+		if d == nil {
+			continue
+		}
+		if _, ok := seen[d.MarketId]; ok {
+			continue
+		}
+		seen[d.MarketId] = struct{}{}
+		stageMarketIDs = append(stageMarketIDs, d.MarketId)
+	}
+
+	prepass := ba.riskPrepassBuilder(ctx, stageMarketIDs)
+	return risk.WithPrepassResult(ctx, prepass)
 }
 
 // ExecuteMarketOrders executes all market orders (spot and derivative) in parallel.
@@ -39,6 +93,8 @@ func (ba *BatchAuction) ExecuteMarketOrders(
 ) ([]*v2.SpotBatchExecutionData, []*v2.DerivativeBatchExecutionData) {
 	defer ba.spotKeeper.Meter(ctx).FuncTiming(&ctx, "BatchAuction.ExecuteMarketOrders")()
 
+	ctx = ba.buildStageRiskContext(ctx, derivativeMarketOrderDirections)
+
 	spotResults := make([]*v2.SpotBatchExecutionData, len(spotMarketOrderIndicators))
 	derivativeResults := make([]*v2.DerivativeBatchExecutionData, len(derivativeMarketOrderDirections))
 	wg := new(sync.WaitGroup)
@@ -49,6 +105,7 @@ func (ba *BatchAuction) ExecuteMarketOrders(
 		wg.Add(1)
 		go func(i int, ind *v2.MarketOrderIndicator) {
 			defer wg.Done()
+			defer recoverFBAGoroutine(ctx, "executeSpotMarketOrder", ind.MarketId)
 			spotResults[i] = ba.executeSpotMarketOrder(ctx, ind, stakingInfo)
 		}(idx, indicator)
 	}
@@ -59,6 +116,7 @@ func (ba *BatchAuction) ExecuteMarketOrders(
 		wg.Add(1)
 		go func(i int, dir *types.MatchedMarketDirection) {
 			defer wg.Done()
+			defer recoverFBAGoroutine(ctx, "executeDerivativeMarketOrder", dir.MarketId.Hex())
 			derivativeResults[i] = ba.executeDerivativeMarketOrder(ctx, dir, stakingInfo)
 		}(idx, direction)
 	}
@@ -94,6 +152,8 @@ func (ba *BatchAuction) executeDerivativeMarketOrder(
 	stakingInfo *v2.FeeDiscountStakingInfo,
 ) *v2.DerivativeBatchExecutionData {
 	defer ba.spotKeeper.Meter(ctx).FuncTiming(&ctx, "BatchAuction.executeDerivativeMarketOrder")()
+
+	ctx = risk.WithCrossMarginLastLookCache(ctx)
 
 	marketID := direction.MarketId
 
@@ -134,6 +194,8 @@ func (ba *BatchAuction) ExecuteLimitOrders(
 ) ([]*v2.SpotBatchExecutionData, []*v2.DerivativeBatchExecutionData) {
 	defer ba.spotKeeper.Meter(ctx).FuncTiming(&ctx, "BatchAuction.ExecuteLimitOrders")()
 
+	ctx = ba.buildStageRiskContext(ctx, derivativeDirections)
+
 	spotResults := make([]*v2.SpotBatchExecutionData, len(spotDirections))
 	derivativeResults := make([]*v2.DerivativeBatchExecutionData, len(derivativeDirections))
 	wg := new(sync.WaitGroup)
@@ -143,6 +205,7 @@ func (ba *BatchAuction) ExecuteLimitOrders(
 		wg.Add(1)
 		go func(i int, marketID common.Hash) {
 			defer wg.Done()
+			defer recoverFBAGoroutine(ctx, "executeSpotLimitOrders", marketID.Hex())
 			spotResults[i] = ba.executeSpotLimitOrders(ctx, marketID, stakingInfo)
 		}(idx, direction.MarketId)
 	}
@@ -152,6 +215,7 @@ func (ba *BatchAuction) ExecuteLimitOrders(
 		wg.Add(1)
 		go func(i int, marketID common.Hash) {
 			defer wg.Done()
+			defer recoverFBAGoroutine(ctx, "executeDerivativeLimitOrders", marketID.Hex())
 			derivativeResults[i] = ba.executeDerivativeLimitOrders(ctx, marketID, stakingInfo, modifiedPositionCache)
 		}(idx, direction.MarketId)
 	}
@@ -186,6 +250,8 @@ func (ba *BatchAuction) executeDerivativeLimitOrders(
 	modifiedPositionCache v2.ModifiedPositionCache,
 ) *v2.DerivativeBatchExecutionData {
 	defer ba.spotKeeper.Meter(ctx).FuncTiming(&ctx, "BatchAuction.executeDerivativeLimitOrders")()
+
+	ctx = risk.WithCrossMarginLastLookCache(ctx)
 
 	market, markPrice := ba.derivativeKeeper.GetDerivativeOrBinaryOptionsMarketWithMarkPrice(ctx, marketID, true)
 	if market == nil {

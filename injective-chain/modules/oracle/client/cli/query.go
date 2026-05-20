@@ -32,6 +32,7 @@ func GetQueryCmd() *cobra.Command {
 		GetStorkPriceStates(),
 		GetStorkPublishers(),
 		GetCoinbasePriceStates(),
+		GetSedaFastPriceStatesCmd(),
 	)
 	return cmd
 }
@@ -213,6 +214,32 @@ func GetCoinbasePriceStates() *cobra.Command {
 			var res proto.Message
 			req := &types.QueryCoinbasePriceStatesRequest{}
 			res, err = queryClient.CoinbasePriceStates(context.Background(), req)
+			if err != nil {
+				return err
+			}
+			return clientCtx.PrintProto(res)
+		},
+	}
+
+	cliflags.AddQueryFlagsToCmd(cmd)
+	return cmd
+}
+
+// GetSedaFastPriceStatesCmd queries all SEDA Fast price states.
+func GetSedaFastPriceStatesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "seda-fast-price-states",
+		Short: "Gets all SEDA Fast price states",
+		Long:  "Gets all SEDA Fast price states, keyed by feedId (hex-encoded execInputs).",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			clientCtx, err := client.GetClientQueryContext(cmd)
+			if err != nil {
+				return err
+			}
+			queryClient := types.NewQueryClient(clientCtx)
+
+			res, err := queryClient.SedaFastPriceStates(context.Background(), &types.QuerySedaFastPriceStatesRequest{})
 			if err != nil {
 				return err
 			}

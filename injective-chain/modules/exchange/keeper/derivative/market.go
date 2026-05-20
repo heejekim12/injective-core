@@ -227,16 +227,7 @@ func (k DerivativeKeeper) GetDerivativeMarketPrice(
 ) (*math.LegacyDec, error) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "GetDerivativeMarketPrice")()
 
-	var price *math.LegacyDec
-
-	if oracleType == oracletypes.OracleType_Provider {
-		// oracleBase should be used for symbol and oracleQuote should be used for price for provider oracles
-		symbol := base
-		provider := quote
-		price = k.oracle.GetProviderPrice(ctx, provider, symbol)
-	} else {
-		price = k.oracle.GetPrice(ctx, oracleType, base, quote)
-	}
+	price := k.oracle.GetReferencePrice(ctx, oracleType, base, quote)
 
 	if price == nil || price.IsNil() {
 		return nil, errors.Wrapf(types.ErrInvalidOracle, "type %s base %s quote %s", oracleType.String(), base, quote)
@@ -299,6 +290,7 @@ func (k DerivativeKeeper) PerpetualMarketLaunch(
 	makerFeeRate, takerFeeRate, minPriceTickSize, minQuantityTickSize, minNotional math.LegacyDec,
 	openNotionalCap v2.OpenNotionalCap,
 	adminInfo *v2.AdminInfo,
+	crossMarginEligible bool,
 ) (*v2.DerivativeMarket, *v2.PerpetualMarketInfo, error) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "PerpetualMarketLaunch")()
 
@@ -365,6 +357,7 @@ func (k DerivativeKeeper) PerpetualMarketLaunch(
 		QuoteDecimals:                 quoteDecimals,
 		OpenNotionalCap:               openNotionalCap,
 		HasDisabledMinimalProtocolFee: false,
+		CrossMarginEligible:           crossMarginEligible,
 	}
 
 	marketInfo := &v2.PerpetualMarketInfo{
@@ -396,6 +389,7 @@ func (k DerivativeKeeper) ExpiryFuturesMarketLaunch(
 	makerFeeRate, takerFeeRate, minPriceTickSize, minQuantityTickSize, minNotional math.LegacyDec,
 	openNotionalCap v2.OpenNotionalCap,
 	adminInfo *v2.AdminInfo,
+	crossMarginEligible bool,
 ) (*v2.DerivativeMarket, *v2.ExpiryFuturesMarketInfo, error) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "ExpiryFuturesMarketLaunch")()
 
@@ -478,6 +472,7 @@ func (k DerivativeKeeper) ExpiryFuturesMarketLaunch(
 		Admin:                         adminInfo.Admin,
 		AdminPermissions:              adminInfo.AdminPermissions,
 		HasDisabledMinimalProtocolFee: false,
+		CrossMarginEligible:           crossMarginEligible,
 	}
 
 	const thirtyMinutesInSeconds = 60 * 30
@@ -673,6 +668,15 @@ func (k DerivativeKeeper) executeSocializedLoss(
 	return socializedLossData.DeficitPositions
 }
 
+// GetInsuranceFundBalance returns the insurance fund balance for a market, or zero if no fund exists.
+func (k DerivativeKeeper) GetInsuranceFundBalance(ctx sdk.Context, marketID common.Hash) math.Int {
+	fund := k.insurance.GetInsuranceFund(ctx, marketID)
+	if fund == nil {
+		return math.ZeroInt()
+	}
+	return fund.Balance
+}
+
 // CONTRACT: absoluteDeficitAmount value must be in chain format
 func (k DerivativeKeeper) PayDeficitFromInsuranceFund(
 	ctx sdk.Context,
@@ -834,6 +838,39 @@ func (k DerivativeKeeper) DemolishOrPauseGenericMarket(ctx sdk.Context, market v
 	return nil
 }
 
+func (k DerivativeKeeper) DemolishForceSettledMarket(ctx sdk.Context, market v2.DerivativeMarketI) error {
+	defer k.Meter(ctx).FuncTiming(&ctx, "DemolishForceSettledMarket")()
+
+	switch market.GetMarketType() {
+	case types.MarketType_BinaryOption:
+		boMarket, ok := market.(*v2.BinaryOptionsMarket)
+		if !ok {
+			return errors.Wrapf(types.ErrBinaryOptionsMarketNotFound, "binary options market conversion in settlement failed")
+		}
+
+		boMarket.Status = v2.MarketStatus_Demolished
+		boMarket.ForcePausedInfo = nil
+		k.SaveBinaryOptionsMarket(ctx, boMarket)
+		events.Emit(ctx, k.BaseKeeper, &v2.EventBinaryOptionsMarketUpdate{
+			Market: *boMarket,
+		})
+	default:
+		derivativeMarket, ok := market.(*v2.DerivativeMarket)
+		if !ok {
+			return errors.Wrapf(types.ErrDerivativeMarketNotFound, "derivative market conversion in settlement failed")
+		}
+
+		derivativeMarket.Status = v2.MarketStatus_Demolished
+		derivativeMarket.ForcePausedInfo = nil
+		k.SetDerivativeMarket(ctx, derivativeMarket)
+
+		events.Emit(ctx, k.BaseKeeper, &v2.EventDerivativeMarketUpdate{
+			Market: *derivativeMarket,
+		})
+	}
+	return nil
+}
+
 func (k DerivativeKeeper) ForcePauseGenericMarket(ctx sdk.Context, market v2.DerivativeMarketI, markPriceAtPausing *math.LegacyDec) error {
 	defer k.Meter(ctx).FuncTiming(&ctx, "ForcePauseGenericMarket")()
 
@@ -899,8 +936,9 @@ func (k DerivativeKeeper) PauseMarketAndScheduleForSettlement(
 	settlementPrice := markPrice
 
 	marketSettlementInfo := v2.DerivativeMarketSettlementInfo{
-		MarketId:        market.MarketID().Hex(),
-		SettlementPrice: settlementPrice,
+		MarketId:           market.MarketID().Hex(),
+		SettlementPrice:    settlementPrice,
+		IsForcedSettlement: false,
 	}
 
 	// swap the gas meter with a threadsafe version
@@ -1310,7 +1348,12 @@ func (k DerivativeKeeper) ProcessMarketsScheduledToSettle(ctx sdk.Context) {
 			k.SetDerivativeMarketWithInfo(ctx, derivativeMarket, nil, nil, nil)
 		}
 
-		if market.GetMarketStatus() == v2.MarketStatus_Active {
+		if marketSettlementInfo.IsForcedSettlement {
+			err := k.DemolishForceSettledMarket(ctx, market)
+			if err != nil {
+				k.Logger(ctx).Error("failed to demolish force-settled market", "error", err)
+			}
+		} else if market.GetMarketStatus() == v2.MarketStatus_Active {
 			err := k.DemolishOrPauseGenericMarket(ctx, market)
 			if err != nil {
 				k.Logger(ctx).Error("failed to demolish or pause generic market in settlement", "error", err)
@@ -1746,8 +1789,9 @@ func (k *DerivativeKeeper) HandleForceSettleMarketByAdmin(ctx sdk.Context, marke
 	}
 
 	k.SetDerivativesMarketScheduledSettlementInfo(ctx, &v2.DerivativeMarketSettlementInfo{
-		MarketId:        derivativeMarket.MarketId,
-		SettlementPrice: *settlementPrice,
+		MarketId:           derivativeMarket.MarketId,
+		SettlementPrice:    *settlementPrice,
+		IsForcedSettlement: true,
 	})
 
 	return nil

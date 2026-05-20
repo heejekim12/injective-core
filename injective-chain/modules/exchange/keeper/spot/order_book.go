@@ -147,8 +147,8 @@ func NewSpotLimitOrderbook(
 	return &orderbook
 }
 
-func (b *SpotLimitOrderbook) GetNotional() math.LegacyDec            { return b.notional }
-func (b *SpotLimitOrderbook) GetTotalQuantityFilled() math.LegacyDec { return b.totalQuantity }
+func (b *SpotLimitOrderbook) GetNotional() math.LegacyDec            { return b.notional.Clone() }
+func (b *SpotLimitOrderbook) GetTotalQuantityFilled() math.LegacyDec { return b.totalQuantity.Clone() }
 func (b *SpotLimitOrderbook) GetTransientOrderbookFills() *v2.OrderbookFills {
 	return b.transientOrderbookFills
 }
@@ -157,13 +157,13 @@ func (b *SpotLimitOrderbook) GetRestingOrderbookFills() *v2.OrderbookFills {
 }
 
 //nolint:revive // ok
-func (b *SpotLimitOrderbook) advanceNewOrder() {
+func (b *SpotLimitOrderbook) advanceNewOrder(ctx sdk.Context) {
 	if b.currState != nil {
 		return
 	}
 
-	restingOrder := b.getRestingOrder()
-	transientOrder := b.getTransientOrder()
+	restingOrder := b.getRestingOrder(ctx)
+	transientOrder := b.getTransientOrder(ctx)
 
 	switch {
 	case restingOrder != nil && transientOrder != nil:
@@ -185,7 +185,7 @@ func (b *SpotLimitOrderbook) advanceNewOrder() {
 func (b *SpotLimitOrderbook) Peek(ctx sdk.Context) *v2.PriceLevel {
 	defer b.k.Meter(ctx).FuncTiming(&ctx, "SpotLimitOrderbook.Peek")()
 	// Sets currState to the orderbook (transientOrderbook or restingOrderbook) with the next best priced order
-	b.advanceNewOrder()
+	b.advanceNewOrder(ctx)
 
 	if b.currState == nil {
 		return nil
@@ -233,8 +233,8 @@ func (b *SpotLimitOrderbook) Fill(ctx sdk.Context, fillQuantity math.LegacyDec) 
 	order := b.currState.Orders[idx]
 	fillNotional := fillQuantity.Mul(order.OrderInfo.Price)
 
-	b.notional = b.notional.Add(fillNotional)
-	b.totalQuantity = b.totalQuantity.Add(fillQuantity)
+	b.notional.AddMut(fillNotional)
+	b.totalQuantity.AddMut(fillQuantity)
 
 	// if currState is fully filled, set to nil
 	if orderCumulativeFillQuantity.Equal(b.currState.Orders[idx].Fillable) {
@@ -259,7 +259,7 @@ func (b *SpotLimitOrderbook) getTransientFillableQuantity() math.LegacyDec {
 	return b.transientOrderbookFills.Orders[idx].Fillable.Sub(b.transientOrderbookFills.FillQuantities[idx])
 }
 
-func (b *SpotLimitOrderbook) getRestingOrder() *v2.SpotLimitOrder {
+func (b *SpotLimitOrderbook) getRestingOrder(ctx sdk.Context) *v2.SpotLimitOrder {
 	// if no more orders to iterate + fully filled, return nil
 	if !b.restingOrderIterator.Valid() && (b.restingOrderbookFills == nil || b.getRestingFillableQuantity().IsZero()) {
 		return nil
@@ -269,20 +269,33 @@ func (b *SpotLimitOrderbook) getRestingOrder() *v2.SpotLimitOrder {
 
 	// if the current resting order state is fully filled, advance the iterator
 	if b.getRestingFillableQuantity().IsZero() {
-		order := b.k.UnmarshalSpotLimitOrder(b.restingOrderIterator.Value())
+		// Iteratively skip paused cross-margin orders to avoid recursion proportional
+		// to the number of consecutive paused orders at the top of the book.
+		for {
+			order := b.k.UnmarshalSpotLimitOrder(b.restingOrderIterator.Value())
+			b.restingOrderIterator.Next()
 
-		b.restingOrderbookFills.Orders = append(b.restingOrderbookFills.Orders, &order)
-		b.restingOrderbookFills.FillQuantities = append(b.restingOrderbookFills.FillQuantities, math.LegacyZeroDec())
+			// Check cross-margin emergency pause. During emergency pause, cross-margin
+			// orders must not match. Skip the order without adding it to fills so that
+			// it remains on the book but does not participate in this block's matching.
+			if err := b.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+				if !b.restingOrderIterator.Valid() {
+					return nil
+				}
+				continue
+			}
 
-		b.restingOrderIterator.Next()
+			b.restingOrderbookFills.Orders = append(b.restingOrderbookFills.Orders, &order)
+			b.restingOrderbookFills.FillQuantities = append(b.restingOrderbookFills.FillQuantities, math.LegacyZeroDec())
 
-		return &order
+			return &order
+		}
 	}
 
 	return b.restingOrderbookFills.Orders[idx]
 }
 
-func (b *SpotLimitOrderbook) getTransientOrder() *v2.SpotLimitOrder {
+func (b *SpotLimitOrderbook) getTransientOrder(ctx sdk.Context) *v2.SpotLimitOrder {
 	if b.transientOrderbookFills == nil {
 		return nil
 	}
@@ -291,13 +304,30 @@ func (b *SpotLimitOrderbook) getTransientOrder() *v2.SpotLimitOrder {
 		return nil
 	}
 
-	if b.getTransientFillableQuantity().IsZero() {
-		b.transientOrderIdx++
-		// apply recursion to obtain the new current New Order
-		return b.getTransientOrder()
-	}
+	// Iteratively advance past filled and paused orders to avoid recursion
+	// proportional to the number of skipped entries.
+	for {
+		if b.getTransientFillableQuantity().IsZero() {
+			b.transientOrderIdx++
+			if len(b.transientOrderbookFills.Orders) == b.transientOrderIdx {
+				return nil
+			}
+			continue
+		}
 
-	return b.transientOrderbookFills.Orders[b.transientOrderIdx]
+		// Check cross-margin emergency pause. Transient orders from paused subaccounts
+		// are normally blocked at placement, but this guards against same-block param changes.
+		order := b.transientOrderbookFills.Orders[b.transientOrderIdx]
+		if err := b.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, order.SubaccountID()); err != nil {
+			b.transientOrderIdx++
+			if len(b.transientOrderbookFills.Orders) == b.transientOrderIdx {
+				return nil
+			}
+			continue
+		}
+
+		return order
+	}
 }
 
 //nolint:revive // ok
@@ -332,8 +362,8 @@ func NewSpotMarketOrderbook(spotMarketOrders []*v2.SpotMarketOrder) *SpotMarketO
 	return &orderGroup
 }
 
-func (b *SpotMarketOrderbook) GetNotional() math.LegacyDec                  { return b.notional }
-func (b *SpotMarketOrderbook) GetTotalQuantityFilled() math.LegacyDec       { return b.totalQuantity }
+func (b *SpotMarketOrderbook) GetNotional() math.LegacyDec                  { return b.notional.Clone() }
+func (b *SpotMarketOrderbook) GetTotalQuantityFilled() math.LegacyDec       { return b.totalQuantity.Clone() }
 func (b *SpotMarketOrderbook) GetOrderbookFillQuantities() []math.LegacyDec { return b.fillQuantities }
 func (b *SpotMarketOrderbook) Done() bool                                   { return b.orderIdx == len(b.orders) }
 func (b *SpotMarketOrderbook) Peek(ctx sdk.Context) *v2.PriceLevel {
@@ -356,8 +386,8 @@ func (b *SpotMarketOrderbook) Fill(_ sdk.Context, fillQuantity math.LegacyDec) {
 	newFillAmount := b.fillQuantities[b.orderIdx].Add(fillQuantity)
 
 	b.fillQuantities[b.orderIdx] = newFillAmount
-	b.notional = b.notional.Add(fillQuantity.Mul(b.orders[b.orderIdx].OrderInfo.Price))
-	b.totalQuantity = b.totalQuantity.Add(fillQuantity)
+	b.notional.AddMut(fillQuantity.Mul(b.orders[b.orderIdx].OrderInfo.Price))
+	b.totalQuantity.AddMut(fillQuantity)
 }
 
 func (*SpotMarketOrderbook) Close() error {

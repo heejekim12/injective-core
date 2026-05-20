@@ -20,5 +20,12 @@ ignore:
 fixes:
   - "/injective-core::"
 
+codecov:
+  notify:
+    # Must match the number of module-tests matrix include rows in .github/workflows/main.yaml
+    after_n_builds: 26
+
 comment:
   layout: "diff"
+  # Same count as codecov.notify.after_n_builds (one Codecov upload per matrix job)
+  after_n_builds: 26

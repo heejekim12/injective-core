@@ -14,15 +14,14 @@ import (
 	cmtypes "github.com/cometbft/cometbft/types"
 	dbm "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/cosmos-sdk/baseapp"
-	"github.com/cosmos/cosmos-sdk/client/flags"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	"github.com/cosmos/cosmos-sdk/testutil/mock"
 	simtestutil "github.com/cosmos/cosmos-sdk/testutil/sims"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-)
 
-const TestChainID = "test-123"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
+)
 
 var setupMutex = new(sync.Mutex)
 
@@ -46,36 +45,25 @@ var DefaultConsensusParams = &cmtproto.ConsensusParams{
 }
 
 const defaultHomeDirForTest = "testrun"
+const TestChainID = "test-123"
 
 // Setup initializes a new InjectiveApp. A Nop logger is set in InjectiveApp.
-func Setup(isCheckTx bool, appOpts ...simtestutil.AppOptionsMap) *InjectiveApp {
+//
+//nolint:revive // control-flag is okey
+func Setup(isCheckTx bool, cfg *config.Config) *InjectiveApp {
 	setupMutex.Lock()
 	defer setupMutex.Unlock()
 
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+
 	sdk.DefaultBondDenom = "inj"
-	testAppOpts := simtestutil.AppOptionsMap{
-		"trace":                 true,
-		"pruning":               "nothing", // Disable pruning for tests to prevent goroutine leaks
-		"iavl-disable-fastnode": true,      // Disable IAVL fast node for tests
-		"iavl-cache-size":       1000,      // Smaller cache for tests
-		"min-retain-blocks":     0,         // Don't retain blocks during tests
-	}
-
-	// Merge with provided options (provided options take precedence)
-	for _, opts := range appOpts {
-		for k, v := range opts {
-			testAppOpts[k] = v
-		}
-	}
-
-	if homeDir, ok := testAppOpts[flags.FlagHome]; !ok || homeDir.(string) == "" {
-		testAppOpts[flags.FlagHome] = defaultHomeDirForTest
-	}
-
-	chainId := TestChainID
-	if iChaindId, ok := testAppOpts["chainId"]; ok && iChaindId.(string) != "" {
-		chainId = iChaindId.(string)
-	}
+	cfg.Set("trace", true)         //nolint
+	cfg.Pruning = "nothing"        // Disable pruning for tests to prevent goroutine leaks
+	cfg.IAVLDisableFastNode = true // Disable IAVL fast node for tests
+	cfg.IAVLCacheSize = 1000       // Smaller cache for tests
+	cfg.MinRetainBlocks = 0        // Don't retain blocks during tests
 
 	db := dbm.NewMemDB()
 	app := NewInjectiveApp(
@@ -83,8 +71,8 @@ func Setup(isCheckTx bool, appOpts ...simtestutil.AppOptionsMap) *InjectiveApp {
 		db,
 		nil,
 		true,
-		testAppOpts,
-		baseapp.SetChainID(chainId),
+		*cfg,
+		baseapp.SetChainID(cfg.GetChainID()),
 	)
 
 	if isCheckTx {
@@ -119,7 +107,7 @@ func Setup(isCheckTx bool, appOpts ...simtestutil.AppOptionsMap) *InjectiveApp {
 	// Initialize the chain
 	_, err = app.InitChain(
 		&abci.InitChainRequest{
-			ChainId:         chainId,
+			ChainId:         cfg.GetChainID(),
 			Validators:      []abci.ValidatorUpdate{},
 			ConsensusParams: DefaultConsensusParams,
 			AppStateBytes:   stateBytes,

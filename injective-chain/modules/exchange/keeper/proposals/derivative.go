@@ -218,6 +218,7 @@ func (k *ProposalKeeper) HandlePerpetualMarketLaunchProposal(ctx sdk.Context, p 
 		p.MinNotional,
 		p.OpenNotionalCap,
 		&adminInfo,
+		p.CrossMarginEligible,
 	)
 
 	return err
@@ -254,6 +255,7 @@ func (k *ProposalKeeper) HandleExpiryFuturesMarketLaunchProposal(ctx sdk.Context
 		p.MinNotional,
 		p.OpenNotionalCap,
 		&adminInfo,
+		p.CrossMarginEligible,
 	)
 	return err
 }

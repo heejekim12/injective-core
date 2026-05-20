@@ -22,7 +22,7 @@ import (
 	"golang.org/x/net/netutil"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/InjectiveLabs/injective-core/cmd/injectived/config"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
 

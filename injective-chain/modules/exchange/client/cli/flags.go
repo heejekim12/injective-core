@@ -35,6 +35,7 @@ const (
 	FlagMinNotional                   = "min-notional"
 	FlagOpenNotionalCap               = "open-notional-cap"
 	FlagHasDisabledMinimalProtocolFee = "disabled-minimal-protocol-fee"
+	FlagCrossMarginEligible           = "cross-margin-eligible"
 	FlagMarketStatus                  = "market-status"
 	FlagTradingRewardCampaigns        = "campaigns"
 	FlagSpotMarketIDs                 = "spot-market-ids"

@@ -7,14 +7,14 @@ title: End-Block
 
 Upon the end of each block the following operations are performed to the state of the module 
 
-## 1. Slashing
+## 1. Jailing
 
-### Validator slashing
+### Validator jailing
 
 A validator is slashed for not signing over a valset update which passed the `SignedValsetsWindow`.
 In other words, if a validator fails to provide the confirmation for a valset update within a preconfigured amount of time, they will be slashed for `SlashFractionValset` portion of their stake and get jailed immediately.
 
-### Batch Slashing
+### Batch jailing
 
 A validator is slashed for not signing over a batch which passed the `SignedBatchesWindow`. 
 In other words, if a validator fails to provide the confirmation for a batch within a preconfigured amount of time, they will be slashed for `SlashFractionBatch` portion of their stake and get jailed immediately.
@@ -33,7 +33,7 @@ The new validator set is eventually relayed to `Peggy contract` on Ethereum.
 
 ## 4. Pruning old validator sets
 
-Previously observed valsets that passed the `SignedValsetsWindow` are removed from the state
+Previously observed valsets that passed the `SignedValsetsWindow` are removed from the state. Peggy waits until after the signing window so the jailing pass can still process those valsets before they are pruned.
 
 ## 5. Attestation processing
 

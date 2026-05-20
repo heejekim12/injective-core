@@ -108,6 +108,13 @@ contract Peggy is
             "Malformed current validator set"
         );
 
+
+        // Zero address cannot be part of a validator set
+        // note: the fix associated with this commit is not deployed anywhere
+        for (uint i = 0; i < _validators.length; i++) {
+            require(_validators[i] != address(0), "zero validator");
+        }
+
         // Check cumulative power to ensure the contract has sufficient power to actually
         // pass a vote
         uint256 cumulativePower = 0;
@@ -162,10 +169,17 @@ contract Peggy is
         bytes32 _r,
         bytes32 _s
     ) private pure returns (bool) {
+        // note: the fix associated with this commit is not deployed anywhere
+        require(_v == 27 || _v == 28, "invalid v");
+
         bytes32 messageDigest = keccak256(
             abi.encodePacked("\x19Ethereum Signed Message:\n32", _theHash)
         );
-        return _signer == ecrecover(messageDigest, _v, _r, _s);
+
+        address recovered = ecrecover(messageDigest, _v, _r, _s);
+        require(recovered != address(0), "invalid sig");
+
+        return _signer == recovered;
     }
 
     // Make a new checkpoint from the supplied validator set
@@ -274,6 +288,12 @@ contract Peggy is
             _newValset.validators.length == _newValset.powers.length,
             "Malformed new validator set"
         );
+
+        // Zero address cannot be part of a validator set update
+        // note: the fix associated with this commit is not deployed anywhere
+        for (uint i = 0; i < _newValset.validators.length; i++) {
+            require(_newValset.validators[i] != address(0), "zero validator");
+        }
 
         // Check that current validators, powers, and signatures (v,r,s) set is well-formed
         require(

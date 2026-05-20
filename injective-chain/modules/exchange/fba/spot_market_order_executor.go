@@ -55,6 +55,10 @@ func (e *SpotMarketOrderExecutor) Execute(
 	marketID := e.market.MarketID()
 	marketOrders := e.keeper.GetAllTransientSpotMarketOrders(ctx, marketID, e.isMarketBuy)
 
+	// Filter out market orders from cross-margin-paused subaccounts. No store writes here —
+	// actual cancellation/refund happens in the pre-FBA cleanup step.
+	marketOrders = filterPausedSpotMarketOrders(ctx, e.keeper, marketOrders)
+
 	if len(marketOrders) == 0 {
 		return spot.GetSpotMarketOrderBatchExecutionData(
 			e.isMarketBuy,

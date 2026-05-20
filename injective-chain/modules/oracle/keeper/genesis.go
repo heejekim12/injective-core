@@ -79,6 +79,14 @@ func (k *Keeper) InitGenesis(ctx sdk.Context, data types.GenesisState) {
 			Prices: data.ChainlinkDataStreamsPriceStates,
 		})
 	}
+
+	for _, pythProPriceState := range data.PythProPriceStates {
+		k.SetPythProPriceState(ctx, pythProPriceState)
+	}
+
+	for _, sedaFastPriceState := range data.SedaFastPriceStates {
+		k.SetSedaFastPriceState(ctx, sedaFastPriceState)
+	}
 }
 
 func (k *Keeper) ExportGenesis(ctx sdk.Context) *types.GenesisState {
@@ -102,5 +110,7 @@ func (k *Keeper) ExportGenesis(ctx sdk.Context) *types.GenesisState {
 		StorkPriceStates:                k.GetAllStorkPriceStates(ctx),
 		StorkPublishers:                 k.GetAllStorkPublishers(ctx),
 		ChainlinkDataStreamsPriceStates: k.GetAllChainlinkDataStreamsPriceStates(ctx),
+		PythProPriceStates:              k.GetAllPythProPriceStates(ctx),
+		SedaFastPriceStates:             k.GetAllSedaFastPriceStates(ctx),
 	}
 }

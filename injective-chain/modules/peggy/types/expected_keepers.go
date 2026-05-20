@@ -52,7 +52,3 @@ type DistributionKeeper interface {
 	GetFeePool(ctx context.Context) (feePool types.FeePool)
 	SetFeePool(ctx context.Context, feePool types.FeePool)
 }
-
-type OracleKeeper interface {
-	GetPythPrice(ctx sdk.Context, base, quote string) *math.LegacyDec
-}

@@ -76,6 +76,12 @@ func (k *BaseKeeper) SetPosition(
 	key := types.MarketSubaccountInfix(marketID, subaccountID)
 	bz := k.cdc.MustMarshal(position)
 	positionStore.Set(key, bz)
+
+	if position != nil && !position.Quantity.IsZero() {
+		k.SetActiveDerivativeMarketForSubaccount(ctx, subaccountID, marketID)
+	} else {
+		k.DeleteActiveDerivativeMarketForSubaccount(ctx, subaccountID, marketID)
+	}
 }
 
 func (k *BaseKeeper) GetPosition(
@@ -122,6 +128,7 @@ func (k *BaseKeeper) DeletePosition(
 	positionStore := prefix.NewStore(store, types.DerivativePositionsPrefix)
 	key := types.MarketSubaccountInfix(marketID, subaccountID)
 	positionStore.Delete(key)
+	k.DeleteActiveDerivativeMarketForSubaccount(ctx, subaccountID, marketID)
 }
 
 // IteratePositionsByMarket Iterates over all the positions in a given market calling process on each position.

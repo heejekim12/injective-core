@@ -4,10 +4,11 @@ import (
 	"fmt"
 
 	"cosmossdk.io/math"
-	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/go-test/deep"
+
+	"github.com/InjectiveLabs/injective-core/injective-chain/modules/exchange/types/v2"
 )
 
 type MetadataInvariantCheckConfig struct {
@@ -30,8 +31,6 @@ func (k *Keeper) IsMetadataInvariantValid(ctx sdk.Context, options ...MetadataIn
 	m3 := k.getAllSubaccountMetadataFromSubaccountOrders(ctx)
 
 	isValid := true
-
-	// Note: These checks don't yet support conditional orders
 
 	if diff := deep.Equal(m1, m2); diff != nil {
 		fmt.Println("❌ SubaccountOrderbook metadata doesnt equal metadata derived from limit orders")
@@ -74,13 +73,33 @@ func (k *Keeper) IsMetadataInvariantValid(ctx sdk.Context, options ...MetadataIn
 		balances := k.GetAllExchangeBalances(ctx)
 		for _, balance := range balances {
 			if balance.Deposits.AvailableBalance.IsNegative() {
-				fmt.Printf("❌ Available %s balance is negative for subaccount %s (%s)", balance.Denom, balance.SubaccountId, balance.Deposits.AvailableBalance)
-				k.Logger(ctx).Error(fmt.Sprintf("❌ Available %s balance is negative for subaccount %s (%s)", balance.Denom, balance.SubaccountId, balance.Deposits.AvailableBalance))
+				_, _ = fmt.Printf(
+					"❌ Available %s balance is negative for subaccount %s (%s)",
+					balance.Denom,
+					balance.SubaccountId,
+					balance.Deposits.AvailableBalance,
+				)
+				k.Logger(ctx).Error(fmt.Sprintf(
+					"❌ Available %s balance is negative for subaccount %s (%s)",
+					balance.Denom,
+					balance.SubaccountId,
+					balance.Deposits.AvailableBalance,
+				))
 				isValid = false
 			}
 			if balance.Deposits.TotalBalance.IsNegative() {
-				fmt.Printf("❌ Total %s balance is negative for subaccount %s (%s)", balance.Denom, balance.SubaccountId, balance.Deposits.TotalBalance)
-				k.Logger(ctx).Error(fmt.Sprintf("❌ Total %s balance is negative for subaccount %s (%s)", balance.Denom, balance.SubaccountId, balance.Deposits.TotalBalance))
+				_, _ = fmt.Printf(
+					"❌ Total %s balance is negative for subaccount %s (%s)",
+					balance.Denom,
+					balance.SubaccountId,
+					balance.Deposits.TotalBalance,
+				)
+				k.Logger(ctx).Error(fmt.Sprintf(
+					"❌ Total %s balance is negative for subaccount %s (%s)",
+					balance.Denom,
+					balance.SubaccountId,
+					balance.Deposits.TotalBalance,
+				))
 				isValid = false
 			}
 			// Check if available balance is greater than total balance
@@ -88,16 +107,29 @@ func (k *Keeper) IsMetadataInvariantValid(ctx sdk.Context, options ...MetadataIn
 			// than total balance due to a difference in the 18th decimal digit
 			availableAndTotalBalanceDifference := balance.Deposits.AvailableBalance.Sub(balance.Deposits.TotalBalance)
 			if availableAndTotalBalanceDifference.GT(math.LegacyMustNewDecFromStr("0.000001")) {
-				fmt.Printf("❌ Available balance is greater than Total balance for %s for subaccount %s (%s > %s)", balance.Denom, balance.SubaccountId, balance.Deposits.TotalBalance, balance.Deposits.TotalBalance)
-				k.Logger(ctx).Error(fmt.Sprintf("❌ Available balance is greater than Total balance for %s for subaccount %s (%s > %s)", balance.Denom, balance.SubaccountId, balance.Deposits.AvailableBalance, balance.Deposits.TotalBalance))
+				_, _ = fmt.Printf(
+					"❌ Available balance is greater than Total balance for %s for subaccount %s (%s > %s)",
+					balance.Denom,
+					balance.SubaccountId,
+					balance.Deposits.AvailableBalance,
+					balance.Deposits.TotalBalance,
+				)
+				k.Logger(ctx).Error(fmt.Sprintf(
+					"❌ Available balance is greater than Total balance for %s for subaccount %s (%s > %s)",
+					balance.Denom,
+					balance.SubaccountId,
+					balance.Deposits.AvailableBalance,
+					balance.Deposits.TotalBalance,
+				))
 				isValid = false
 			}
 		}
 	}
 
+	isConditionalOrderValid := k.isConditionalOrderInvariantValid(ctx)
 	isMarketAggregateVolumeValid := k.IsMarketAggregateVolumeValid(ctx)
 
-	return isValid && isMarketAggregateVolumeValid
+	return isValid && isConditionalOrderValid && isMarketAggregateVolumeValid
 }
 
 // getAllSubaccountOrderbookMetadata is a helper method only used by tests to verify data integrity
@@ -228,6 +260,64 @@ func (k *Keeper) getAllSubaccountMetadataFromSubaccountOrders(
 	})
 
 	return metadatas
+}
+
+func (k *Keeper) verifyConditionalDerivativeLimitOrdersIndexed(
+	ctx sdk.Context,
+	marketID common.Hash,
+	orders []*v2.DerivativeLimitOrder,
+	orderKind string,
+) bool {
+	isValid := true
+	for _, order := range orders {
+		found, _ := k.GetConditionalDerivativeLimitOrderBySubaccountIDAndHash(ctx, marketID, nil, order.SubaccountID(), order.Hash())
+		if found == nil {
+			_, _ = fmt.Printf("❌ Conditional %s order %s not found via index for market %s subaccount %s\n",
+				orderKind, order.Hash().Hex(), marketID.Hex(), order.SubaccountID().Hex())
+			isValid = false
+		}
+	}
+	return isValid
+}
+
+func (k *Keeper) verifyConditionalDerivativeMarketOrdersIndexed(
+	ctx sdk.Context,
+	marketID common.Hash,
+	orders []*v2.DerivativeMarketOrder,
+	orderKind string,
+) bool {
+	isValid := true
+	for _, order := range orders {
+		found, _ := k.GetConditionalDerivativeMarketOrderBySubaccountIDAndHash(ctx, marketID, nil, order.SubaccountID(), order.Hash())
+		if found == nil {
+			_, _ = fmt.Printf("❌ Conditional %s order %s not found via index for market %s subaccount %s\n",
+				orderKind, order.Hash().Hex(), marketID.Hex(), order.SubaccountID().Hex())
+			isValid = false
+		}
+	}
+	return isValid
+}
+
+// isConditionalOrderInvariantValid verifies that every conditional order in the price-sorted
+// store can be looked up via the subaccount index, ensuring the two stores are consistent.
+func (k *Keeper) isConditionalOrderInvariantValid(ctx sdk.Context) bool {
+	markets := k.GetAllDerivativeMarkets(ctx)
+	isValid := true
+
+	for _, market := range markets {
+		marketID := market.MarketID()
+		orderbook := k.GetAllConditionalDerivativeOrdersUpToMarkPrice(ctx, marketID, nil)
+		if orderbook.IsEmpty() {
+			continue
+		}
+
+		isValid = k.verifyConditionalDerivativeLimitOrdersIndexed(ctx, marketID, orderbook.LimitBuyOrders, "limit buy") && isValid
+		isValid = k.verifyConditionalDerivativeLimitOrdersIndexed(ctx, marketID, orderbook.LimitSellOrders, "limit sell") && isValid
+		isValid = k.verifyConditionalDerivativeMarketOrdersIndexed(ctx, marketID, orderbook.MarketBuyOrders, "market buy") && isValid
+		isValid = k.verifyConditionalDerivativeMarketOrdersIndexed(ctx, marketID, orderbook.MarketSellOrders, "market sell") && isValid
+	}
+
+	return isValid
 }
 
 // IsMarketAggregateVolumeValid should only be used by tests to verify data integrity

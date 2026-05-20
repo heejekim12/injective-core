@@ -6,51 +6,17 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
+	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
-
-// ChainlinkDataStreamsKeeper defines the interface for Chainlink Data Streams operations.
-type ChainlinkDataStreamsKeeper interface {
-	GetChainlinkDataStreamsPrice(ctx sdk.Context, base, quote string) *math.LegacyDec
-	SetChainlinkDataStreamsPriceState(ctx sdk.Context, priceState *types.ChainlinkDataStreamsPriceState)
-	GetChainlinkDataStreamsPriceState(ctx sdk.Context, feedID string) *types.ChainlinkDataStreamsPriceState
-	GetAllChainlinkDataStreamsPriceStates(ctx sdk.Context) []*types.ChainlinkDataStreamsPriceState
-}
-
-// GetChainlinkDataStreamsPrice gets price for a given base/quote pair.
-func (k *Keeper) GetChainlinkDataStreamsPrice(ctx sdk.Context, base, quote string) *math.LegacyDec {
-	defer k.Meter(ctx).FuncTiming(&ctx, "GetChainlinkDataStreamsPrice")()
-
-	basePriceState := k.GetChainlinkDataStreamsPriceState(ctx, base)
-	if basePriceState == nil {
-		return nil
-	}
-
-	if quote == types.QuoteUSD {
-		return &basePriceState.PriceState.Price
-	}
-
-	quotePriceState := k.GetChainlinkDataStreamsPriceState(ctx, quote)
-	if quotePriceState == nil {
-		return nil
-	}
-
-	basePrice := basePriceState.PriceState.Price
-	quotePrice := quotePriceState.PriceState.Price
-
-	if basePrice.IsNil() || quotePrice.IsNil() || !basePrice.IsPositive() || !quotePrice.IsPositive() {
-		return nil
-	}
-
-	price := basePrice.Quo(quotePrice)
-	return &price
-}
 
 // SetChainlinkDataStreamsPriceState stores a given Chainlink Data Streams price state.
 func (k *Keeper) SetChainlinkDataStreamsPriceState(ctx sdk.Context, priceState *types.ChainlinkDataStreamsPriceState) {
 	defer k.Meter(ctx).FuncTiming(&ctx, "SetChainlinkDataStreamsPriceState")()
 
 	priceKey := types.GetChainlinkDataStreamsPriceStoreKey(priceState.FeedId)
-	bz := k.cdc.MustMarshal(priceState)
+	toStore := *priceState
+	toStore.FeedId = ""
+	bz := k.cdc.MustMarshal(&toStore)
 
 	k.getStore(ctx).Set(priceKey, bz)
 
@@ -71,6 +37,7 @@ func (k *Keeper) GetChainlinkDataStreamsPriceState(ctx sdk.Context, feedID strin
 	}
 
 	k.cdc.MustUnmarshal(bz, &priceState)
+	priceState.FeedId = feedID
 	return &priceState
 }
 
@@ -83,14 +50,13 @@ func (k *Keeper) GetAllChainlinkDataStreamsPriceStates(ctx sdk.Context) []*types
 
 	priceStore := prefix.NewStore(store, types.ChainlinkDataStreamsPriceKey)
 
-	iter := priceStore.Iterator(nil, nil)
-	defer iter.Close()
-
-	for ; iter.Valid(); iter.Next() {
+	chaintypes.IterateSafe(priceStore.Iterator(nil, nil), func(iterKey, iterVal []byte) bool {
 		var priceState types.ChainlinkDataStreamsPriceState
-		k.cdc.MustUnmarshal(iter.Value(), &priceState)
+		k.cdc.MustUnmarshal(iterVal, &priceState)
+		priceState.FeedId = types.GetChainlinkDataStreamsFeedIDFromIterKey(iterKey)
 		priceStates = append(priceStates, &priceState)
-	}
+		return false
+	})
 
 	return priceStates
 }
