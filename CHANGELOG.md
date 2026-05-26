@@ -54,6 +54,7 @@ Ref: https://keepachangelog.com/en/1.1.0/
 - (peggy)  Reject zero Ethereum addresses when registering orchestrator
 - (peggo)  Oracle loop properly updates end block when querying Eth blocks
 - (peggy)  Orchestrators sign oldest unsigned batch as opposed to latest
+- (exchange)  Fix synthetic derivative partial closes to validate residual positions against maintenance margin instead of initial margin
 
 ### Improvements
 

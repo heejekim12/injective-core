@@ -26,8 +26,8 @@ The raw bytes in each `MsgRelaySedaFastPrices.updates` entry are a JSON object m
 | `data.signature` | `SedaFastRespData.Signature` | 65-byte hex-encoded secp256k1 signature |
 | `data.result` | *(not captured)* | Off-chain convenience mirror; **not signed**, **not used on-chain** — ignored during JSON decoding |
 | `data.dataRequest.version` | `SedaFastDataRequest.Version` | |
-| `data.dataRequest.execProgramId` | `SedaFastDataRequest.ExecProgramID` | 64-char hex; used to select the price parser |
-| **`data.dataRequest.execInputs`** | `SedaFastDataRequest.FeedID` | **feed identifier** — see "feedId rationale" below |
+| `data.dataRequest.execProgramId` | `SedaFastDataRequest.ExecProgramID` | 64-char hex; used to select the price parser and derive the composite feed ID |
+| **`data.dataRequest.execInputs`** | `SedaFastDataRequest.ExecInputs` | Oracle Program inputs; used together with `execProgramId` to derive the composite feed ID |
 | `data.dataRequest.execGasLimit` | `SedaFastDataRequest.ExecGasLimit` | string-encoded uint64 |
 | `data.dataRequest.tallyProgramId` | `SedaFastDataRequest.TallyProgramID` | 64-char hex |
 | `data.dataRequest.tallyInputs` | `SedaFastDataRequest.TallyInputs` | hex |
@@ -49,31 +49,35 @@ The raw bytes in each `MsgRelaySedaFastPrices.updates` entry are a JSON object m
 
 ## feedId rationale
 
-In the SEDA Fast protocol the wire field is called `execInputs`. On-chain the chain uses the name **feedId** everywhere, because `execInputs` is opaque to the chain and its sole purpose is to identify which price feed a result belongs to.
+In SEDA Fast, `execInputs` is optional and belongs to a specific `execProgramId`. A no-input Oracle Program has empty `execInputs`, and two different programs can legitimately use identical inputs. Therefore `execInputs` alone is not a safe on-chain feed identity.
 
 Concretely:
-- `SedaFastDataRequest.FeedID` (Go) maps to `json:"execInputs"` (wire).
-- The on-chain feed identity key stored in state, emitted in events, and used as the market `OracleInfo.Symbol` is the **canonical** form of the `feedId` bytes.
+- `SedaFastDataRequest.ExecInputs` (Go) maps to `json:"execInputs"` (wire).
+- The on-chain feed identity key stored in state, emitted in events, and used as the market `OracleInfo.Symbol` is a **composite** hash of `execProgramId` and `execInputs`.
 
 ### Canonical form
 
-The canonical SEDA Fast feed ID is defined as:
+The canonical SEDA Fast feed ID is:
 
-- **Non-empty** — an empty feed ID is rejected.
-- **No `0x` / `0X` prefix** — any such prefix is stripped during relay and rejected at market creation.
-- **Lowercase hex only** (`0–9`, `a–f`) — uppercase characters are rejected at market creation; during relay, mixed/uppercase hex is normalised to lowercase.
-- **Even length** — an odd number of characters is not a valid hex byte sequence.
+```
+feedID = hex(keccak256(execProgramIDBytes || keccak256(execInputsBytes)))
+```
 
-This is exactly the form produced by `hex.EncodeToString(bytes)`.
+Where:
+
+- `execProgramIDBytes` is the 32-byte value decoded from `data.dataRequest.execProgramId`.
+- `execInputsBytes` is decoded from `data.dataRequest.execInputs`: explicit `0x` / `0X` values are decoded as hex; lowercase even-length hex strings are decoded as hex; all other strings are treated as UTF-8 bytes. Empty `execInputs` is valid and hashes as the empty byte slice.
+- The resulting feed ID is always exactly 64 lowercase hex characters.
 
 **Enforcement points:**
 
 | Entry point | Behaviour |
 |---|---|
-| `processUpdate` (relay assistant) | Strips `0x`/`0X` prefix, hex-decodes, re-encodes to lowercase. Invalid hex rejects the update (best-effort). |
-| `SpotMarket` / `DerivativeMarket` / `BinaryOptionsMarket` proposals (`OracleType_SedaFast`) | `ValidateBasic` rejects `OracleBase` / `OracleQuote` that do not satisfy `ValidateCanonicalSedaFastFeedID`. USD quote is always accepted as-is. |
+| `processUpdate` (relay assistant) | Computes the composite feed ID from the signed `execProgramId` and `execInputs`, then stores and emits that ID. Invalid explicit hex inputs reject the update (best-effort). |
+| Derivative market proposals and instant-launch messages (`OracleType_SedaFast`) | `ValidateBasic` rejects `OracleBase` / `OracleQuote` unless they are exactly 64 lowercase hex characters. USD quote is always accepted as-is. |
+| `injectived query oracle seda-fast-feed-id <execProgramId> <execInputs>` | Computes the same composite feed ID for market launch and param-update proposals. |
 
-This guarantees that `GetSedaFastPriceStoreKey(feedID)` — which hashes the string with `keccak256` — always receives the same byte sequence for the same logical feed, regardless of how the relayer encoded `execInputs`.
+This keeps the on-chain feed identity aligned with SEDA's own `drId` construction while preserving fixed-size market oracle symbols.
 
 ## Identifier derivation (on-chain integrity checks)
 
@@ -144,6 +148,7 @@ For the JSON parser the actual price is computed as `mantissa × 10^expo` using 
 - **Signed price source:** price bytes are taken exclusively from `data.dataResult.result` (covered by the signature). The unsigned top-level `data.result` field is not decoded by the chain; it cannot influence stored prices.
 - **JSON exponent bound:** JSON feeds reject `|expo| > MaxSedaFastExponent` (18) to prevent attacker-controlled `big.Int` exponentiation via `LegacyDec.Power`.
 - **Timestamp handling:** the chain does **not** compare SEDA Fast `dataResult.blockTimestamp` to Injective `ctx.BlockTime()` (validator wall clocks are not a reliable cross-chain reference). There is no on-chain “max age” or staleness parameter for SEDA timestamps.
+- **Composite feed identity:** state is keyed by `keccak256(execProgramId || keccak256(execInputs))`, not by `execInputs` alone. Empty inputs and identical inputs across different Oracle Programs therefore do not collide.
 - **Per-feed monotonic ordering:** for a given feed, an update is written only if `dataResult.blockTimestamp` is **strictly greater** than the timestamp already stored for that feed. If the incoming timestamp is equal or older, the relay still succeeds for that update (no batch error), but state and `EventOraclePriceUpdate` are left unchanged—the relayer simply moves on. The stored `PriceState` block time is still Injective’s `ctx.BlockTime()` when a write occurs.
 
 ## Operator runbook
@@ -173,3 +178,19 @@ Submit a governance `MsgUpdateParams` that sets `seda_fast_params.public_key` to
 - Add a new simple program: include its 64-char hex ID in `seda_fast_params.simple_program_ids` via governance `MsgUpdateParams`.
 - Add a new JSON program: include its 64-char hex ID in `seda_fast_params.json_program_ids` via governance `MsgUpdateParams`.
 - IDs cannot appear in both lists simultaneously; `ValidateSedaFastParams` will reject such params.
+
+### v1.20.0-beta.2 testnet migration
+
+The v1.20.0-beta.2 testnet upgrade changes SEDA Fast feed IDs from canonical `execInputs` to the composite hash described above. The upgrade handler deletes existing `SedaFastPriceState` rows because the old keys cannot be converted without historical `execProgramId` data. Relayers repopulate the oracle state under the new composite feed IDs after the upgrade.
+
+For each existing SEDA Fast-backed derivative market, operators must:
+
+1. Compute the new feed ID:
+
+```
+injectived query oracle seda-fast-feed-id <execProgramId> <execInputs>
+```
+
+2. Submit a `DerivativeMarketParamUpdateProposal` setting `OracleBase` and, if the quote is not USD, `OracleQuote` to the computed composite feed IDs.
+
+The market ID itself does not change. Until the param update lands, oracle lookups for that market return nil and trading on that market stalls.

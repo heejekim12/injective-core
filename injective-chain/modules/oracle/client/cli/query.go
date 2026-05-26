@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cosmos/gogoproto/proto"
 
@@ -33,6 +34,7 @@ func GetQueryCmd() *cobra.Command {
 		GetStorkPublishers(),
 		GetCoinbasePriceStates(),
 		GetSedaFastPriceStatesCmd(),
+		GetSedaFastFeedIDCmd(),
 	)
 	return cmd
 }
@@ -230,7 +232,7 @@ func GetSedaFastPriceStatesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "seda-fast-price-states",
 		Short: "Gets all SEDA Fast price states",
-		Long:  "Gets all SEDA Fast price states, keyed by feedId (hex-encoded execInputs).",
+		Long:  "Gets all SEDA Fast price states, keyed by the composite SEDA Fast feed ID.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			clientCtx, err := client.GetClientQueryContext(cmd)
@@ -248,5 +250,29 @@ func GetSedaFastPriceStatesCmd() *cobra.Command {
 	}
 
 	cliflags.AddQueryFlagsToCmd(cmd)
+	return cmd
+}
+
+// GetSedaFastFeedIDCmd computes the composite SEDA Fast feed ID used in market OracleParams.
+func GetSedaFastFeedIDCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "seda-fast-feed-id [execProgramId] [execInputs]",
+		Short: "Computes the composite SEDA Fast feed ID",
+		Long:  "Computes hex(keccak256(execProgramId || keccak256(execInputs))) for use as OracleBase or OracleQuote in SEDA Fast markets.",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			execInputs, err := types.DecodeSedaFastExecInputs(args[1])
+			if err != nil {
+				return err
+			}
+			feedID, err := types.ComputeSedaFastFeedID(args[0], execInputs)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), feedID)
+			return err
+		},
+	}
+
 	return cmd
 }

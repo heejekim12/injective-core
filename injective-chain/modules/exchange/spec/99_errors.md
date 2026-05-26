@@ -69,7 +69,7 @@ This document lists the error codes used in the module.
 | exchange |  62 | already opted out of rewards |
 | exchange |  63 | Invalid margin ratio |
 | exchange |  64 | Provided funds are below minimum |
-| exchange |  65 | Position is below initial margin requirement |
+| exchange |  65 | Position margin is below the required threshold |
 | exchange |  66 | Pool has non-positive total lp token supply |
 | exchange |  67 | Passed lp token burn amount is greater than total lp token supply |
 | exchange |  68 | unsupported action |

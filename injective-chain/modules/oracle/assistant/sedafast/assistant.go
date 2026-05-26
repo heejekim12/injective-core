@@ -27,7 +27,7 @@ type Keeper interface {
 	Meter(ctx context.Context) metrics.Meter
 	GetParams(ctx sdk.Context) types.Params
 	GetSedaFastPriceState(ctx sdk.Context, feedID string) *types.SedaFastPriceState
-	SetSedaFastPriceState(ctx sdk.Context, priceState *types.SedaFastPriceState)
+	SetSedaFastPriceState(ctx sdk.Context, priceState *types.SedaFastPriceState) error
 	EmitSedaFastPriceUpdate(ctx sdk.Context, feedID string, priceState *types.PriceState)
 }
 
@@ -126,31 +126,33 @@ func (a *Assistant) processUpdate(ctx sdk.Context, raw []byte, sfp types.SedaFas
 		return errors.Wrapf(types.ErrBadPrice, "seda fast price must be positive, got %s", price)
 	}
 
-	feedID, err := canonicalizeFeedID(env.Data.DataRequest.FeedID)
+	feedID, err := computeFeedID(env.Data.DataRequest.ExecProgramID, env.Data.DataRequest.ExecInputs)
 	if err != nil {
 		return errors.Wrap(types.ErrSedaFastPayloadMalformed, err.Error())
 	}
 
 	blockTimestamp, _ := strconv.ParseUint(env.Data.DataResult.BlockTimestamp, 10, 64)
-	a.upsertPriceState(ctx, feedID, price, blockTimestamp, ctx.BlockTime().Unix())
-	return nil
+	return a.upsertPriceState(ctx, feedID, price, blockTimestamp, ctx.BlockTime().Unix())
 }
 
-func (a *Assistant) upsertPriceState(ctx sdk.Context, feedID string, price math.LegacyDec, blockTimestamp uint64, blockTime int64) {
+func (a *Assistant) upsertPriceState(ctx sdk.Context, feedID string, price math.LegacyDec, blockTimestamp uint64, blockTime int64) error {
 	existing := a.keeper.GetSedaFastPriceState(ctx, feedID)
 	if existing != nil {
 		if blockTimestamp <= existing.Timestamp {
-			return
+			return nil
 		}
 		if types.CheckPriceFeedThreshold(existing.PriceState.Price, price) {
-			return
+			return nil
 		}
 		existing.Update(price, blockTimestamp, blockTime)
 	} else {
 		existing = types.NewSedaFastPriceState(feedID, price, blockTimestamp, blockTime)
 	}
-	a.keeper.SetSedaFastPriceState(ctx, existing)
+	if err := a.keeper.SetSedaFastPriceState(ctx, existing); err != nil {
+		return errors.Wrap(types.ErrSedaFastPayloadMalformed, err.Error())
+	}
 	a.keeper.EmitSedaFastPriceUpdate(ctx, feedID, &existing.PriceState)
+	return nil
 }
 
 // verifyUpdate performs the drId integrity check and the secp256k1 signature
@@ -351,16 +353,12 @@ func resolvePriceParser(execProgramID string, sfp types.SedaFastParams) (pricePa
 		"execProgramId %q not in simple_program_ids or json_program_ids", execProgramID)
 }
 
-// canonicalizeFeedID strips any 0x/0X prefix, hex-decodes, and re-encodes to
-// lowercase. This normalises all wire variants of the same feed bytes to a
-// single on-chain store key regardless of what the relayer sends.
-func canonicalizeFeedID(raw string) (string, error) {
-	stripped := strings.TrimPrefix(strings.TrimPrefix(raw, "0x"), "0X")
-	b, err := hex.DecodeString(stripped)
-	if err != nil || len(b) == 0 {
-		return "", fmt.Errorf("feedId %q is not valid hex", raw)
+func computeFeedID(execProgramIDHex, rawInputs string) (string, error) {
+	inputsBytes, err := types.DecodeSedaFastExecInputs(rawInputs)
+	if err != nil {
+		return "", err
 	}
-	return hex.EncodeToString(b), nil
+	return types.ComputeSedaFastFeedID(execProgramIDHex, inputsBytes)
 }
 
 func decodeHexBytes(s string) ([]byte, error) {

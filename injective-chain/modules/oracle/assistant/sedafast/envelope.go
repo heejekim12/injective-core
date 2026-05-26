@@ -38,14 +38,10 @@ type RespData struct {
 }
 
 // DataRequest maps "result.data.dataRequest".
-// The Go field FeedID corresponds to the SEDA wire field "execInputs" and is
-// the stable on-chain identity of the feed.
 type DataRequest struct {
-	Version       string `json:"version"`
-	ExecProgramID string `json:"execProgramId"`
-	// FeedID is the chain-internal name for "execInputs". It is a hex string
-	// identifying which feed this result belongs to.
-	FeedID            string `json:"execInputs"`
+	Version           string `json:"version"`
+	ExecProgramID     string `json:"execProgramId"`
+	ExecInputs        string `json:"execInputs"`
 	ExecGasLimit      string `json:"execGasLimit"`
 	TallyProgramID    string `json:"tallyProgramId"`
 	TallyInputs       string `json:"tallyInputs"`
@@ -63,8 +59,8 @@ type DataResult struct {
 	DrID      string `json:"drId"`
 	Consensus bool   `json:"consensus"`
 	ExitCode  uint32 `json:"exitCode"`
-	// Result is hex-encoded bytes (the Oracle Program output), used only to
-	// compute the dataResultId keccak256 hash. Not used for price parsing.
+	// Result is hex-encoded bytes (the Oracle Program output). It is committed
+	// into dataResultId and later parsed as the authoritative price payload.
 	Result string `json:"result"`
 	// BlockHeight is always "0" for SEDA Fast (off-chain execution).
 	BlockHeight string `json:"blockHeight"`
@@ -113,7 +109,7 @@ func (req *DataRequest) DrID() ([32]byte, error) {
 	if err != nil {
 		return [32]byte{}, err
 	}
-	feedIDBytes, err := decodeHexField("execInputs/feedId", req.FeedID)
+	execInputsBytes, err := types.DecodeSedaFastExecInputs(req.ExecInputs)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -149,7 +145,7 @@ func (req *DataRequest) DrID() ([32]byte, error) {
 	preimage := make([]byte, 0, 256)
 	preimage = append(preimage, crypto.Keccak256([]byte(req.Version))...)
 	preimage = append(preimage, execProgramIDBytes...)
-	preimage = append(preimage, crypto.Keccak256(feedIDBytes)...)
+	preimage = append(preimage, crypto.Keccak256(execInputsBytes)...)
 	binary.BigEndian.PutUint64(buf[:], execGasLimit)
 	preimage = append(preimage, buf[:]...)
 	preimage = append(preimage, tallyProgramIDBytes...)

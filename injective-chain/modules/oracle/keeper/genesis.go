@@ -85,7 +85,9 @@ func (k *Keeper) InitGenesis(ctx sdk.Context, data types.GenesisState) {
 	}
 
 	for _, sedaFastPriceState := range data.SedaFastPriceStates {
-		k.SetSedaFastPriceState(ctx, sedaFastPriceState)
+		if err = k.SetSedaFastPriceState(ctx, sedaFastPriceState); err != nil {
+			panic(err)
+		}
 	}
 }
 

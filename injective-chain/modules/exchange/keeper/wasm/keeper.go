@@ -1110,8 +1110,14 @@ func (k WasmKeeper) applySyntheticTrade(
 			return nil, types.ErrNegativePositionQuantity
 		}
 	} else {
-		if err := ensureSyntheticTradePositionPostDelta(position, market, markPrice); err != nil {
-			return nil, err
+		if isStrictlyReducing {
+			if err := ensurePositionAboveMaintenanceMarginRatio(position, market, markPrice); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := ensureSyntheticTradePositionPostDelta(position, market, markPrice); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1352,7 +1358,7 @@ func (WasmKeeper) ensurePositionAboveBankruptcyForClosing(
 	if positionMarginRatio.LT(bankruptcyMarginRatio) {
 		return errors.Wrapf(
 			types.ErrLowPositionMargin,
-			"position margin ratio %s ≥ %s must hold", positionMarginRatio.String(), market.InitialMarginRatio.String(),
+			"position margin ratio %s ≥ %s must hold", positionMarginRatio.String(), bankruptcyMarginRatio.String(),
 		)
 	}
 
