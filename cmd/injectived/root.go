@@ -390,8 +390,11 @@ func newInjApp(logger log.Logger, db dbm.DB, traceStore io.Writer, cfg appconfig
 		}
 	}
 
+	loadLatest := os.Getenv("COSMOS_SDK_ROLLBACK_SKIP_LOAD_LATEST") != "true"
+
 	return app.NewInjectiveApp(
-		logger, db, traceStore, true,
+		logger, db, traceStore,
+		loadLatest,
 		cfg,
 		baseAppOptions...,
 	)

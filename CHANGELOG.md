@@ -34,7 +34,7 @@ Ref: https://keepachangelog.com/en/1.1.0/
 
 # Changelog
 
-## [Unreleased] (going to be v1.20)
+## [v1.20.0](https://github.com/InjectiveFoundation/injective-core/releases/tag/v1.20.0) - 2026-06-04
 
 ### Features
 
@@ -69,16 +69,16 @@ Ref: https://keepachangelog.com/en/1.1.0/
 
 - (hyperlane)  Deprecate Hyperlane SDK modules from InjectiveApp
 
-## [Unreleased] (going to be v1.19)
+## [v1.19.0](https://github.com/InjectiveFoundation/injective-core/releases/tag/v1.19.0) - 2026-04-24
 
 ### Features
 
 - (evm)  Add missing JSON-RPC methods (eth_getBlockReceipts) and tweak limits for tracing
 - (exchange)  Added white-knight liquidator fee split configuration and logic
+- (ops)  switch to OpenTelemetry metrics and tracing
 
 ### Bug Fixes
 
-- (evm)  Evm txns indexing in RPC shifted when block contains reverted txns
 - (evm)  Fix in the EVM GetBalance function to return the account's available balance only, and not the total balance
 - (peggy)  Added EthereumSigned interface registration in peggy module codec
 - (permissions)  Fix EVM hook issues (gas consumption, error handling)
@@ -94,28 +94,28 @@ Ref: https://keepachangelog.com/en/1.1.0/
 - (peggy)  Apply new oracle id when updating a rate limit
 - (peggy)  Prevent bogus future claims from bloating the state
 - (peggy)  Invalid deposits contribute to rate limit inflow
-- (peggy)  Apply mint amount restrictions on all erc20 assets
 
 ### Improvements
 
 - (go)  Update build env to Go 1.26.2
-- (exchange)  move EnforcedRestrictedContracts params to permissions module and introduce Pause, Blacklist, UnBlacklist event listeners.
 - (permissions)  Add genesis validation for namespaces
 - (insurance)  Added event for failed insurance withdrawals
 - (oracle)  Added extra check to ensure that Chainlink Data Stream new price is stores only when it is greater than zero
-- (app)  switch to OpenTelemetry metrics and tracing
 - (insurance)  Added DOS resilience for insurance redemptions
 - (exchange)  Added PostOnlyMode checks to privileged actions
 - (auction)  changed the TX fees transfer to the auction module to use a module subaccount. The subaccount funds are moved to the auction module main account when the new round starts
 - (evm)  purge the key from EVM State Storage when set to empty value
 - (exchange)  Improved offsetting logic by using bankruptcy settling price and guarding emergency settling
-- (exchange)  Removed ability to increase someone else's position margin via MsgIncreasePositionMargin
 - (auction)  Added vouchers capabilities in the auction module to create vouchers when any tokens in the auction basket fail to be sent to the auction winner
 - (insurance)  Added vouchers capabilities in the insurance module to create vouchers when withdrawal logic fails to send the insurance deposits to the user for a redemption
 - (erc20)  Check not only for supply but also for denom metadata existence during token pair creation
 - (authz)  Revoke authz SendAuthorizations from blacklisted user on permissions hook event
-- (peggy)  Track net outflow on a per-block basis to avoid computation on each rate limit check
 - (chainstream)  Added support in chainstream for Chainlink Data Stream oracle price updates
+- (peggy)  Apply mint amount restrictions on all erc20 assets
+
+### Deprecated
+
+- (oracle)  Deprecated old OCR Chainlink oracle (that was never used in mainnet)
 
 ## [v1.18.3](https://github.com/InjectiveFoundation/injective-core/releases/tag/v1.18.3) - 2026-04-07
 
@@ -152,12 +152,18 @@ Ref: https://keepachangelog.com/en/1.1.0/
 - (ledger)  Added multisig support for transactions with Ledger signatures
 - (websocket)  New websocket server that works as a wrapper of the chainstream server, allowing users to receive the same updates without using gRPC streams
 - (exchange)  Added support for disable minimum protocol fee for certain markets via governance
-- (oracle)  Added the new oracle type for prices provided by Chainlink Data Streams
+- (oracle)  Added the new oracle type for prices provided by Chainling Data Streams
 - (exchange)  New message to activate the PostOnlyMode for a configurable number of blocks (restricted to governance or exchange module admins)
 - (exchange)  Enable user to contract position transfers for wasm privileged actions
+- (permissions) Support for EVM contract hook inside permissions module
+- (evm)  Bump max contract code size to 100000
 
 ### Bug Fixes
 
+- (evm)  Fix in the EVM GetBalance function to return the account's available balance only, and not the total balance
+- (peggy)  Added EthereumSigned interface registration in peggy module codec
+- (peggy)  Added logic to initialize MintAmountERC20 value when creating a new peggy rate limit
+- (evm)  Allow set-metadata from bank precompile only for erc20 denoms
 - (exchange)  Added AdminInfo validation in market launch proposals for spot, perpetual and expiry futures markets
 - (exchange)  Fixed unmarshalling issue of json-encoded BatchExchangeModificationsProposal in cli.
 - (exchange)  Removed the special permission for exchange module admins to change the module's params
@@ -172,43 +178,33 @@ Ref: https://keepachangelog.com/en/1.1.0/
 - (peggy)  Use math.LegacyDec instead of float64 for calculating power diff between valsets
 - (peggo)  Remove redundant sleep when relaying events to Injective
 - (evm)  Support block.basefee call from EVM code but return 0 as we don't have correct wiring yet
+- (evm)  Allow set-metadata from bank precompile only for erc20 denoms
 - (peggy)  Ensure txs from Alchemy WS can be identified by their ABI method
 - (peggy)  Creating batches does not depend on fees of the previous batch
+- (txfees)  Improved txfees module params validation to avoid possible divisions by zero when calculating the dynamic gas price
 
 ### Improvements
 
 - (erc20)  Allow only FixedSupply version of ERC20 token pair for tokenfactory denoms with disabled mint / burn policies
-- (exchange) Refactored exchange keeper's internal logic into several Go packages
-- (CI) Fixed racy Docker port allocation in interchain CI
 - (exchange) Implemented a hook inside exchange for EVM PostTxProcessing to be able to call custom exchange logic on EVM events.
-- (permissions) Support for EVM contract hook inside permissions module
 - (exchange)  Simplify synthetic trades
+- (exchange)  Added more logically consistent behavior for reduce-only synthetic trades
 - (evm)  Simplify log decoding to only use transaction response data
 - (exchange)  Added position cache into order matching for improved accuracy in validation checks
 - (auction)  Allow current auction best bidder to increase the bid amount by sending only the funds for the increment amount
-- (auction)  Add chain halt protection to auction module
 - (exchange)  Added logic to emit execution (trade) events for the synthetic trades executed via wasm privileged actions in the exchange module
-- (evm)  Bump max contract code size to 100000
-- (peggy)  Introduce coretracer to Peggy Orchestrator and health check HTTP endpoint
-- (evm)  Fix solidity contract versions in precompile bindings for reproducible builds and verification
+- (peggy)  Introduce Peggy Orchestrator health check HTTP endpoint
+- (evm)  Freeze solidity contract versions in precompile bindings for reproducible builds and verification
 - (permissions)  Allow removing of hook addresses from a namespace via MsgUpdateNamespace
-- (txfees)  Improved txfees module params validation to avoid possible divisions by zero when calculating the dynamic gas price
-- (exchange)  added more logically consistent behavior for reduce-only synthetic trades
 
 ### API Breaking
 
 - (evm)  Exchange precompile now uses human-readable number format (API FORMAT with 18 decimal scaling) for numeric parameters:
-- Derivative orders: price, quantity, margin
-- Spot orders: price, quantity
-- Position margin operations: margin amount
-- Order queries: returns prices and quantities in API FORMAT
-- Deposit/withdraw/transfer operations remain in CHAIN FORMAT (token's native decimals)
-
-## [v1.17.3](https://github.com/InjectiveFoundation/injective-core/releases/tag/v1.17.3) - 9999-99-99
-
-### Bug Fixes
-
-- (exchange)  Added validation in the automatic transfer of default subaccount deposit balance to the bank account to only decrement the deposit balance if the transfer to the bank account succeeds
+  - Derivative orders: price, quantity, margin
+  - Spot orders: price, quantity
+  - Position margin operations: margin amount
+  - Order queries: returns prices and quantities in API FORMAT
+  - Deposit/withdraw/transfer operations remain in CHAIN FORMAT (token's native decimals)
 
 ## [v1.17.2](https://github.com/InjectiveFoundation/injective-core/releases/tag/v1.17.2) - 2025-12-18
 
