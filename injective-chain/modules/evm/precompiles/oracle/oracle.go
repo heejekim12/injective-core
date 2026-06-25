@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"errors"
+	"math"
 	"math/big"
 
 	errorsmod "cosmossdk.io/errors"
@@ -94,6 +95,10 @@ func (*Contract) Name() string {
 func (c *Contract) RequiredGas(input []byte) uint64 {
 	if len(input) < 4 {
 		return 0
+	}
+	// Reject oversized calldata before ABI decoding.
+	if len(input) > precomptypes.MAX_ABI_ENCODED_CALLDATA_LENGTH {
+		return math.MaxUint64
 	}
 
 	baseCost := uint64(len(input)) * c.kvGasConfig.WriteCostPerByte

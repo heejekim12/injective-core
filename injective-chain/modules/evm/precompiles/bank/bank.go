@@ -3,6 +3,7 @@ package bank
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -121,6 +122,10 @@ func (*Contract) Name() string {
 func (bc *Contract) RequiredGas(input []byte) uint64 {
 	if len(input) < 4 {
 		return 0
+	}
+	// Reject oversized calldata before ABI decoding.
+	if len(input) > precomptypes.MAX_ABI_ENCODED_CALLDATA_LENGTH {
+		return math.MaxUint64
 	}
 
 	// base cost to prevent large input size

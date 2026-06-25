@@ -1,5 +1,5 @@
 #install packages for build layer
-FROM golang:1.26.2-bookworm AS builder
+FROM golang:1.26.4-bookworm AS builder
 RUN apt install git gcc make libc-dev
 
 ARG DO_COVERAGE=false

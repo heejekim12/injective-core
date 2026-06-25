@@ -11,6 +11,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/distribution/types"
 	slashingtypes "github.com/cosmos/cosmos-sdk/x/slashing/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+
+	oracletypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 )
 
 // StakingKeeper defines the expected staking keeper methods
@@ -51,4 +53,8 @@ type DistributionKeeper interface {
 	FundCommunityPool(ctx context.Context, amount sdk.Coins, sender sdk.AccAddress) error
 	GetFeePool(ctx context.Context) (feePool types.FeePool)
 	SetFeePool(ctx context.Context, feePool types.FeePool)
+}
+
+type OracleKeeper interface {
+	GetReferencePrice(ctx sdk.Context, oracleType oracletypes.OracleType, base, quote string) *math.LegacyDec
 }

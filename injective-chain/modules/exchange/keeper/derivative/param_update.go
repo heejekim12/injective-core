@@ -273,7 +273,13 @@ func (k DerivativeKeeper) handleDerivativeFeeIncreaseForConditionals(
 
 	for _, order := range orderbook.GetMarketOrders() {
 		if !k.tryChargeExtraFeeForDerivativeOrder(ctx, order, order.SubaccountID(), feeChargeRate, denom, prevMarket) {
-			if err := k.CancelConditionalDerivativeMarketOrder(ctx, prevMarket, order.SubaccountID(), nil, order.Hash()); err != nil {
+			panicked, err := k.CancelConditionalDerivativeMarketOrderWithCache(ctx, prevMarket, order.SubaccountID(), nil, order.Hash())
+			if panicked {
+				k.Logger(ctx).Info(
+					"CancelConditionalDerivativeMarketOrder panicked during handleDerivativeFeeIncreaseForConditionals",
+					"orderHash", common.BytesToHash(order.OrderHash).Hex(),
+				)
+			} else if err != nil {
 				k.Logger(ctx).Info(
 					"CancelConditionalDerivativeMarketOrder failed during handleDerivativeFeeIncreaseForConditionals",
 					"orderHash", common.BytesToHash(order.OrderHash).Hex(),
@@ -285,7 +291,13 @@ func (k DerivativeKeeper) handleDerivativeFeeIncreaseForConditionals(
 
 	for _, order := range orderbook.GetLimitOrders() {
 		if !k.tryChargeExtraFeeForDerivativeOrder(ctx, order, order.SubaccountID(), feeChargeRate, denom, prevMarket) {
-			if err := k.CancelConditionalDerivativeLimitOrder(ctx, prevMarket, order.SubaccountID(), nil, order.Hash()); err != nil {
+			panicked, err := k.cancelConditionalDerivativeLimitOrderWithCache(ctx, prevMarket, order.SubaccountID(), nil, order.Hash())
+			if panicked {
+				k.Logger(ctx).Info(
+					"CancelConditionalDerivativeLimitOrder panicked during handleDerivativeFeeIncreaseForConditionals",
+					"orderHash", common.BytesToHash(order.OrderHash).Hex(),
+				)
+			} else if err != nil {
 				k.Logger(ctx).Info(
 					"CancelConditionalDerivativeLimitOrder failed during handleDerivativeFeeIncreaseForConditionals",
 					"orderHash", common.BytesToHash(order.OrderHash).Hex(),

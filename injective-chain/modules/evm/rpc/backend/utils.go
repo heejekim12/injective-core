@@ -109,10 +109,9 @@ func (b *Backend) processBlock(
 	blockHeight := cometBlock.Block.Height
 	blockBaseFee, err := b.BaseFee(cometBlockResult)
 	if err != nil || blockBaseFee == nil {
-		targetOneFeeHistory.BaseFee = big.NewInt(0)
-	} else {
-		targetOneFeeHistory.BaseFee = blockBaseFee
+		blockBaseFee = big.NewInt(0)
 	}
+	targetOneFeeHistory.BaseFee = blockBaseFee
 
 	// set gas used ratio
 	gasLimitUint64, ok := ethBlock["gasLimit"].(hexutil.Uint64)
@@ -125,7 +124,7 @@ func (b *Backend) processBlock(
 		return fmt.Errorf("invalid gas used type: %T", ethBlock["gasUsed"])
 	}
 
-	targetOneFeeHistory.NextBaseFee = new(big.Int)
+	targetOneFeeHistory.NextBaseFee = new(big.Int).Set(targetOneFeeHistory.BaseFee)
 
 	gasusedfloat, _ := new(big.Float).SetInt(gasUsedBig.ToInt()).Float64()
 
@@ -198,6 +197,15 @@ func (b *Backend) processBlock(
 	}
 
 	return nil
+}
+
+func effectiveGasPrice(tx *ethtypes.Transaction, baseFee *big.Int) *big.Int {
+	gasPrice := tx.GasPrice()
+	if tx.Type() != ethtypes.DynamicFeeTxType || baseFee == nil {
+		return gasPrice
+	}
+
+	return evmtypes.EffectiveGasPrice(baseFee, tx.GasFeeCap(), tx.GasTipCap())
 }
 
 // ShouldIgnoreGasUsed returns true if the gasUsed in result should be ignored

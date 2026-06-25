@@ -21,7 +21,7 @@ Home of the following services:
 
 ### Building from sources
 
-In order to build from source you’ll need [Go 1.26.2](https://go.dev/dl/).
+In order to build from source you’ll need [Go 1.26.4](https://go.dev/dl/).
 
 ```bash
 # need to clone if you plan to run tests, and use Makefile

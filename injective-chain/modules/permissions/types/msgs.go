@@ -224,13 +224,13 @@ func (msg MsgUpdateActorRoles) ValidateBasic() error {
 		}
 		roles[roleName] = struct{}{}
 
+		if chaintypes.HasDuplicate(role.Actors) {
+			return ErrInvalidRole.Wrapf("repeated actors for role %s to add", roleName)
+		}
+
 		for _, actor := range role.Actors {
 			if _, err := sdk.AccAddressFromBech32(actor); err != nil {
 				return err
-			}
-
-			if chaintypes.HasDuplicate(role.Actors) {
-				return ErrInvalidRole.Wrapf("repeated actor %s for role %s to add", actor, roleName)
 			}
 		}
 	}
@@ -252,13 +252,13 @@ func (msg MsgUpdateActorRoles) ValidateBasic() error {
 		}
 		roles[roleName] = struct{}{}
 
+		if chaintypes.HasDuplicate(role.Actors) {
+			return ErrInvalidRole.Wrapf("repeated actors for role %s to revoke", roleName)
+		}
+
 		for _, actor := range role.Actors {
 			if _, err := sdk.AccAddressFromBech32(actor); err != nil {
 				return err
-			}
-
-			if chaintypes.HasDuplicate(role.Actors) {
-				return ErrInvalidRole.Wrapf("repeated actor %s for role %s to revoke", actor, roleName)
 			}
 		}
 	}

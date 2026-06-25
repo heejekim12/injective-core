@@ -76,6 +76,10 @@ func (e *Publisher) Run(ctx context.Context) error {
 	ctx, e.eventsContextCancelFn = context.WithCancel(ctx)
 	eventsBuffer := make(chan baseapp.StreamEvents, e.bufferCapacity)
 
+	e.mu.Lock()
+	e.inBuffer = v2.NewStreamResponseMap()
+	e.mu.Unlock()
+
 	e.wg.Add(2)
 	go e.handleIncomingEvents(ctx, eventsBuffer, logger)
 	go e.processEventsBuffer(ctx, eventsBuffer, logger)
@@ -118,9 +122,6 @@ func (e *Publisher) handleBufferOverflow(ctx context.Context, logger log.Logger)
 
 func (e *Publisher) processEventsBuffer(ctx context.Context, eventsBuffer chan baseapp.StreamEvents, logger log.Logger) {
 	defer e.wg.Done()
-	e.mu.Lock()
-	e.inBuffer = v2.NewStreamResponseMap()
-	e.mu.Unlock()
 	for {
 		select {
 		case <-ctx.Done():

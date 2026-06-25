@@ -147,6 +147,9 @@ func (k *BaseKeeper) GetConditionalDerivativeLimitOrderBySubaccountIDAndHash(
 
 	var orderObj v2.DerivativeLimitOrder
 	k.cdc.MustUnmarshal(orderBz, &orderObj)
+	if orderObj.TriggerPrice == nil {
+		orderObj.TriggerPrice = &triggerPrice
+	}
 
 	return &orderObj, direction
 }
@@ -188,6 +191,9 @@ func (k *BaseKeeper) GetConditionalDerivativeMarketOrderBySubaccountIDAndHash( /
 
 	var orderObj v2.DerivativeMarketOrder
 	k.cdc.MustUnmarshal(orderBz, &orderObj)
+	if orderObj.TriggerPrice == nil {
+		orderObj.TriggerPrice = &triggerPrice
+	}
 	return &orderObj, direction
 }
 

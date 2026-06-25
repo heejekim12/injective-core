@@ -242,7 +242,7 @@ func (k Keeper) EthCall(c context.Context, req *types.EthCallRequest) (*types.Ms
 
 	defer func() {
 		if r := recover(); r != nil {
-			k.Logger(ctx).Error("panic in eth_call", "panic", r, "stack", string(debug.Stack()))
+			k.Logger(ctx).Debug("panic in eth_call", "panic", r, "stack", string(debug.Stack()))
 			panic(r)
 		}
 	}()

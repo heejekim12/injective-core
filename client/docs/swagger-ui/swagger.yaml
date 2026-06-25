@@ -23068,8 +23068,10 @@ paths:
                         token_price_id:
                           type: string
                           title: >-
-                            a Pyth-specific ID used to obtain USD price of the
-                            ERC20 token
+                            unique ID used to obtain the notional USD value of
+                            the ERC20 token from
+
+                            oracle
                         rate_limit_window:
                           type: string
                           format: uint64
@@ -23106,6 +23108,31 @@ paths:
                                 type: boolean
                                 title: type of transfer (withdrawal/deposit)
                           title: transfers that occurred within the sliding window
+                        token_oracle_type:
+                          title: >-
+                            oracle type used to obtain the USD price of the
+                            ERC20 token (in relation
+
+                            with token_price_id)
+                          type: string
+                          enum:
+                            - Unspecified
+                            - Band
+                            - PriceFeed
+                            - Coinbase
+                            - Chainlink
+                            - Razor
+                            - Dia
+                            - API3
+                            - Uma
+                            - Pyth
+                            - BandIBC
+                            - Provider
+                            - Stork
+                            - ChainlinkDataStreams
+                            - PythPro
+                            - SedaFast
+                          default: Unspecified
                   rate_limit_transfers:
                     type: array
                     items:
@@ -115358,7 +115385,11 @@ definitions:
               title: decimals of the ERC20 token
             token_price_id:
               type: string
-              title: a Pyth-specific ID used to obtain USD price of the ERC20 token
+              title: >-
+                unique ID used to obtain the notional USD value of the ERC20
+                token from
+
+                oracle
             rate_limit_window:
               type: string
               format: uint64
@@ -115393,6 +115424,31 @@ definitions:
                     type: boolean
                     title: type of transfer (withdrawal/deposit)
               title: transfers that occurred within the sliding window
+            token_oracle_type:
+              title: >-
+                oracle type used to obtain the USD price of the ERC20 token (in
+                relation
+
+                with token_price_id)
+              type: string
+              enum:
+                - Unspecified
+                - Band
+                - PriceFeed
+                - Coinbase
+                - Chainlink
+                - Razor
+                - Dia
+                - API3
+                - Uma
+                - Pyth
+                - BandIBC
+                - Provider
+                - Stork
+                - ChainlinkDataStreams
+                - PythPro
+                - SedaFast
+              default: Unspecified
       rate_limit_transfers:
         type: array
         items:
@@ -116845,8 +116901,10 @@ definitions:
                 token_price_id:
                   type: string
                   title: >-
-                    a Pyth-specific ID used to obtain USD price of the ERC20
-                    token
+                    unique ID used to obtain the notional USD value of the ERC20
+                    token from
+
+                    oracle
                 rate_limit_window:
                   type: string
                   format: uint64
@@ -116881,6 +116939,31 @@ definitions:
                         type: boolean
                         title: type of transfer (withdrawal/deposit)
                   title: transfers that occurred within the sliding window
+                token_oracle_type:
+                  title: >-
+                    oracle type used to obtain the USD price of the ERC20 token
+                    (in relation
+
+                    with token_price_id)
+                  type: string
+                  enum:
+                    - Unspecified
+                    - Band
+                    - PriceFeed
+                    - Coinbase
+                    - Chainlink
+                    - Razor
+                    - Dia
+                    - API3
+                    - Uma
+                    - Pyth
+                    - BandIBC
+                    - Provider
+                    - Stork
+                    - ChainlinkDataStreams
+                    - PythPro
+                    - SedaFast
+                  default: Unspecified
           rate_limit_transfers:
             type: array
             items:
@@ -117367,7 +117450,11 @@ definitions:
         title: decimals of the ERC20 token
       token_price_id:
         type: string
-        title: a Pyth-specific ID used to obtain USD price of the ERC20 token
+        title: >-
+          unique ID used to obtain the notional USD value of the ERC20 token
+          from
+
+          oracle
       rate_limit_window:
         type: string
         format: uint64
@@ -117398,6 +117485,31 @@ definitions:
               type: boolean
               title: type of transfer (withdrawal/deposit)
         title: transfers that occurred within the sliding window
+      token_oracle_type:
+        title: >-
+          oracle type used to obtain the USD price of the ERC20 token (in
+          relation
+
+          with token_price_id)
+        type: string
+        enum:
+          - Unspecified
+          - Band
+          - PriceFeed
+          - Coinbase
+          - Chainlink
+          - Razor
+          - Dia
+          - API3
+          - Uma
+          - Pyth
+          - BandIBC
+          - Provider
+          - Stork
+          - ChainlinkDataStreams
+          - PythPro
+          - SedaFast
+        default: Unspecified
   injective.peggy.v1.RateLimitTransfers:
     type: object
     properties:

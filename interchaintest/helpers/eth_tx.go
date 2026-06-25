@@ -2,19 +2,26 @@ package helpers
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"regexp"
 	"strings"
+	"testing"
 
 	"github.com/InjectiveLabs/sdk-go/chain/crypto/ethsecp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
+	"github.com/ethereum/go-ethereum/common"
 	ethcmn "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/pkg/errors"
 	"github.com/strangelove-ventures/interchaintest/v8/chain/cosmos"
+	"github.com/strangelove-ventures/interchaintest/v8/ibc"
+
+	evmtypes "github.com/InjectiveLabs/sdk-go/chain/evm/types"
 )
 
 func SignAndBroadcastEthTxs(
@@ -157,4 +164,77 @@ func ParseEthChainID(chainID string) (*big.Int, error) {
 	}
 
 	return chainIDInt, nil
+}
+
+func BuildCosmosEvmMsg(
+	ethPriv *ecdsa.PrivateKey,
+	evmChainID *big.Int,
+	nonce uint64,
+	to common.Address,
+	value *big.Int,
+	gasLimit uint64,
+	gasPrice *big.Int,
+	data []byte,
+) (*evmtypes.MsgEthereumTx, error) {
+	ethTx := ethtypes.NewTransaction(
+		nonce,
+		to,
+		value,
+		gasLimit,
+		gasPrice,
+		data,
+	)
+
+	signer := ethtypes.LatestSignerForChainID(evmChainID)
+
+	signedEthTx, err := ethtypes.SignTx(ethTx, signer, ethPriv)
+	if err != nil {
+		return nil, err
+	}
+
+	var msg evmtypes.MsgEthereumTx
+
+	// This sets both:
+	//   msg.Raw  = signed Ethereum tx
+	//   msg.From = recovered Ethereum sender bytes
+	if err := msg.FromSignedEthereumTx(signedEthTx, signer); err != nil {
+		return nil, err
+	}
+
+	return &msg, nil
+}
+
+func BroadcastEthereumTxSync(
+	t *testing.T,
+	ctx context.Context,
+	chain *cosmos.CosmosChain,
+	user ibc.Wallet,
+	msg *evmtypes.MsgEthereumTx,
+	evmDenom string,
+) (string, error) {
+	broadcaster := cosmos.NewBroadcaster(t, chain)
+
+	clientCtx, err := broadcaster.GetClientContext(ctx, user)
+	if err != nil {
+		return "", fmt.Errorf("failed to get client context: %w", err)
+	}
+
+	txBuilder := clientCtx.TxConfig.NewTxBuilder()
+
+	// cosmos/evm helper:
+	// - sets MsgEthereumTx
+	// - sets ExtensionOptionsEthereumTx
+	// - sets gas/fee from the EVM tx
+	// - does NOT add Cosmos signer infos/signatures
+	sdkTx, err := msg.BuildTx(txBuilder, evmDenom)
+	if err != nil {
+		return "", fmt.Errorf("failed to build ethereum sdk tx: %w", err)
+	}
+
+	txBytes, err := clientCtx.TxConfig.TxEncoder()(sdkTx)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode ethereum sdk tx: %w", err)
+	}
+
+	return BroadcastRawTxBytesSync(ctx, chain, txBytes)
 }

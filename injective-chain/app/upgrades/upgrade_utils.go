@@ -17,6 +17,7 @@ import (
 	slashingkeeper "github.com/cosmos/cosmos-sdk/x/slashing/keeper"
 	stakingkeeper "github.com/cosmos/cosmos-sdk/x/staking/keeper"
 	icahostkeeper "github.com/cosmos/ibc-go/v8/modules/apps/27-interchain-accounts/host/keeper"
+	ibckeeper "github.com/cosmos/ibc-go/v8/modules/core/keeper"
 	"github.com/pkg/errors"
 
 	auctionkeeper "github.com/InjectiveLabs/injective-core/injective-chain/modules/auction/keeper"
@@ -127,6 +128,7 @@ func (s *UpgradeHandlerStep) recoverPanic(logger log.Logger, errOut *error) {
 type InjectiveApplication interface {
 	AppCodec() codec.Codec
 	ChainID() string
+	GetIBCKeeper() *ibckeeper.Keeper
 	GetExchangeKeeper() *exchangekeeper.Keeper
 	GetBankKeeper() bankkeeper.Keeper
 	GetAccountKeeper() authkeeper.AccountKeeper

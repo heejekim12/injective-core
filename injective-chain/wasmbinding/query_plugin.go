@@ -71,71 +71,71 @@ func CustomQuerier(qp *QueryPlugin) wasmkeeper.CustomQuerier {
 
 type AcceptedStargateQueries map[string]proto.Message
 
-func getWhitelistedQueries() wasmkeeper.AcceptedQueries {
-	return wasmkeeper.AcceptedQueries{
+func getWhitelistedQueries() map[string]func() proto.Message {
+	return map[string]func() proto.Message{
 		// auth
-		"/cosmos.auth.v1beta1.Query/Account": &authtypes.QueryAccountResponse{},
-		"/cosmos.auth.v1beta1.Query/Params":  &authtypes.QueryParamsResponse{},
+		"/cosmos.auth.v1beta1.Query/Account": func() proto.Message { return &authtypes.QueryAccountResponse{} },
+		"/cosmos.auth.v1beta1.Query/Params":  func() proto.Message { return &authtypes.QueryParamsResponse{} },
 
 		// bank
-		"/cosmos.bank.v1beta1.Query/Balance":       &banktypes.QueryBalanceResponse{},
-		"/cosmos.bank.v1beta1.Query/DenomMetadata": &banktypes.QueryDenomsMetadataResponse{},
-		"/cosmos.bank.v1beta1.Query/Params":        &banktypes.QueryParamsResponse{},
-		"/cosmos.bank.v1beta1.Query/SupplyOf":      &banktypes.QuerySupplyOfResponse{},
+		"/cosmos.bank.v1beta1.Query/Balance":       func() proto.Message { return &banktypes.QueryBalanceResponse{} },
+		"/cosmos.bank.v1beta1.Query/DenomMetadata": func() proto.Message { return &banktypes.QueryDenomsMetadataResponse{} },
+		"/cosmos.bank.v1beta1.Query/Params":        func() proto.Message { return &banktypes.QueryParamsResponse{} },
+		"/cosmos.bank.v1beta1.Query/SupplyOf":      func() proto.Message { return &banktypes.QuerySupplyOfResponse{} },
 
 		// Injective queries
 		// Exchange
-		"/injective.exchange.v1beta1.Query/QueryExchangeParams":                 &exchangetypes.QueryExchangeParamsResponse{},
-		"/injective.exchange.v1beta1.Query/SubaccountDeposit":                   &exchangetypes.QuerySubaccountDepositResponse{},
-		"/injective.exchange.v1beta1.Query/DerivativeMarket":                    &exchangetypes.QueryDerivativeMarketResponse{},
-		"/injective.exchange.v1beta1.Query/SpotMarket":                          &exchangetypes.QuerySpotMarketResponse{},
-		"/injective.exchange.v1beta1.Query/SubaccountEffectivePositionInMarket": &exchangetypes.QuerySubaccountEffectivePositionInMarketResponse{},
-		"/injective.exchange.v1beta1.Query/SubaccountPositionInMarket":          &exchangetypes.QuerySubaccountPositionInMarketResponse{},
-		"/injective.exchange.v1beta1.Query/TraderDerivativeOrders":              &exchangetypes.QueryTraderDerivativeOrdersResponse{},
-		"/injective.exchange.v1beta1.Query/TraderDerivativeTransientOrders":     &exchangetypes.QueryTraderDerivativeOrdersResponse{},
-		"/injective.exchange.v1beta1.Query/TraderSpotTransientOrders":           &exchangetypes.QueryTraderSpotOrdersResponse{},
-		"/injective.exchange.v1beta1.Query/TraderSpotOrders":                    &exchangetypes.QueryTraderSpotOrdersResponse{},
-		"/injective.exchange.v1beta1.Query/PerpetualMarketInfo":                 &exchangetypes.QueryPerpetualMarketInfoResponse{},
-		"/injective.exchange.v1beta1.Query/PerpetualMarketFunding":              &exchangetypes.QueryPerpetualMarketFundingResponse{},
-		"/injective.exchange.v1beta1.Query/MarketVolatility":                    &exchangetypes.QueryMarketVolatilityResponse{},
-		"/injective.exchange.v1beta1.Query/SpotMidPriceAndTOB":                  &exchangetypes.QuerySpotMidPriceAndTOBResponse{},
-		"/injective.exchange.v1beta1.Query/DerivativeMidPriceAndTOB":            &exchangetypes.QueryDerivativeMidPriceAndTOBResponse{},
-		"/injective.exchange.v1beta1.Query/AggregateMarketVolume":               &exchangetypes.QueryAggregateMarketVolumeResponse{},
-		"/injective.exchange.v1beta1.Query/SpotOrderbook":                       &exchangetypes.QuerySpotOrderbookResponse{},
-		"/injective.exchange.v1beta1.Query/DerivativeOrderbook":                 &exchangetypes.QueryDerivativeOrderbookResponse{},
-		"/injective.exchange.v1beta1.Query/MarketAtomicExecutionFeeMultiplier":  &exchangetypes.QueryMarketAtomicExecutionFeeMultiplierResponse{},
+		"/injective.exchange.v1beta1.Query/QueryExchangeParams":                 func() proto.Message { return &exchangetypes.QueryExchangeParamsResponse{} },
+		"/injective.exchange.v1beta1.Query/SubaccountDeposit":                   func() proto.Message { return &exchangetypes.QuerySubaccountDepositResponse{} },
+		"/injective.exchange.v1beta1.Query/DerivativeMarket":                    func() proto.Message { return &exchangetypes.QueryDerivativeMarketResponse{} },
+		"/injective.exchange.v1beta1.Query/SpotMarket":                          func() proto.Message { return &exchangetypes.QuerySpotMarketResponse{} },
+		"/injective.exchange.v1beta1.Query/SubaccountEffectivePositionInMarket": func() proto.Message { return &exchangetypes.QuerySubaccountEffectivePositionInMarketResponse{} },
+		"/injective.exchange.v1beta1.Query/SubaccountPositionInMarket":          func() proto.Message { return &exchangetypes.QuerySubaccountPositionInMarketResponse{} },
+		"/injective.exchange.v1beta1.Query/TraderDerivativeOrders":              func() proto.Message { return &exchangetypes.QueryTraderDerivativeOrdersResponse{} },
+		"/injective.exchange.v1beta1.Query/TraderDerivativeTransientOrders":     func() proto.Message { return &exchangetypes.QueryTraderDerivativeOrdersResponse{} },
+		"/injective.exchange.v1beta1.Query/TraderSpotTransientOrders":           func() proto.Message { return &exchangetypes.QueryTraderSpotOrdersResponse{} },
+		"/injective.exchange.v1beta1.Query/TraderSpotOrders":                    func() proto.Message { return &exchangetypes.QueryTraderSpotOrdersResponse{} },
+		"/injective.exchange.v1beta1.Query/PerpetualMarketInfo":                 func() proto.Message { return &exchangetypes.QueryPerpetualMarketInfoResponse{} },
+		"/injective.exchange.v1beta1.Query/PerpetualMarketFunding":              func() proto.Message { return &exchangetypes.QueryPerpetualMarketFundingResponse{} },
+		"/injective.exchange.v1beta1.Query/MarketVolatility":                    func() proto.Message { return &exchangetypes.QueryMarketVolatilityResponse{} },
+		"/injective.exchange.v1beta1.Query/SpotMidPriceAndTOB":                  func() proto.Message { return &exchangetypes.QuerySpotMidPriceAndTOBResponse{} },
+		"/injective.exchange.v1beta1.Query/DerivativeMidPriceAndTOB":            func() proto.Message { return &exchangetypes.QueryDerivativeMidPriceAndTOBResponse{} },
+		"/injective.exchange.v1beta1.Query/AggregateMarketVolume":               func() proto.Message { return &exchangetypes.QueryAggregateMarketVolumeResponse{} },
+		"/injective.exchange.v1beta1.Query/SpotOrderbook":                       func() proto.Message { return &exchangetypes.QuerySpotOrderbookResponse{} },
+		"/injective.exchange.v1beta1.Query/DerivativeOrderbook":                 func() proto.Message { return &exchangetypes.QueryDerivativeOrderbookResponse{} },
+		"/injective.exchange.v1beta1.Query/MarketAtomicExecutionFeeMultiplier":  func() proto.Message { return &exchangetypes.QueryMarketAtomicExecutionFeeMultiplierResponse{} },
 		// ExchangeV2
-		"/injective.exchange.v2.Query/QueryExchangeParams":                 &exchangev2.QueryExchangeParamsResponse{},
-		"/injective.exchange.v2.Query/SubaccountDeposit":                   &exchangev2.QuerySubaccountDepositResponse{},
-		"/injective.exchange.v2.Query/DerivativeMarket":                    &exchangev2.QueryDerivativeMarketResponse{},
-		"/injective.exchange.v2.Query/SpotMarket":                          &exchangev2.QuerySpotMarketResponse{},
-		"/injective.exchange.v2.Query/SubaccountEffectivePositionInMarket": &exchangev2.QuerySubaccountEffectivePositionInMarketResponse{},
-		"/injective.exchange.v2.Query/SubaccountPositionInMarket":          &exchangev2.QuerySubaccountPositionInMarketResponse{},
-		"/injective.exchange.v2.Query/TraderDerivativeOrders":              &exchangev2.QueryTraderDerivativeOrdersResponse{},
-		"/injective.exchange.v2.Query/TraderDerivativeTransientOrders":     &exchangev2.QueryTraderDerivativeOrdersResponse{},
-		"/injective.exchange.v2.Query/TraderSpotTransientOrders":           &exchangev2.QueryTraderSpotOrdersResponse{},
-		"/injective.exchange.v2.Query/TraderSpotOrders":                    &exchangev2.QueryTraderSpotOrdersResponse{},
-		"/injective.exchange.v2.Query/PerpetualMarketInfo":                 &exchangev2.QueryPerpetualMarketInfoResponse{},
-		"/injective.exchange.v2.Query/PerpetualMarketFunding":              &exchangev2.QueryPerpetualMarketFundingResponse{},
-		"/injective.exchange.v2.Query/MarketVolatility":                    &exchangev2.QueryMarketVolatilityResponse{},
-		"/injective.exchange.v2.Query/SpotMidPriceAndTOB":                  &exchangev2.QuerySpotMidPriceAndTOBResponse{},
-		"/injective.exchange.v2.Query/DerivativeMidPriceAndTOB":            &exchangev2.QueryDerivativeMidPriceAndTOBResponse{},
-		"/injective.exchange.v2.Query/AggregateMarketVolume":               &exchangev2.QueryAggregateMarketVolumeResponse{},
-		"/injective.exchange.v2.Query/SpotOrderbook":                       &exchangev2.QuerySpotOrderbookResponse{},
-		"/injective.exchange.v2.Query/DerivativeOrderbook":                 &exchangev2.QueryDerivativeOrderbookResponse{},
-		"/injective.exchange.v2.Query/MarketAtomicExecutionFeeMultiplier":  &exchangev2.QueryMarketAtomicExecutionFeeMultiplierResponse{},
+		"/injective.exchange.v2.Query/QueryExchangeParams":                 func() proto.Message { return &exchangev2.QueryExchangeParamsResponse{} },
+		"/injective.exchange.v2.Query/SubaccountDeposit":                   func() proto.Message { return &exchangev2.QuerySubaccountDepositResponse{} },
+		"/injective.exchange.v2.Query/DerivativeMarket":                    func() proto.Message { return &exchangev2.QueryDerivativeMarketResponse{} },
+		"/injective.exchange.v2.Query/SpotMarket":                          func() proto.Message { return &exchangev2.QuerySpotMarketResponse{} },
+		"/injective.exchange.v2.Query/SubaccountEffectivePositionInMarket": func() proto.Message { return &exchangev2.QuerySubaccountEffectivePositionInMarketResponse{} },
+		"/injective.exchange.v2.Query/SubaccountPositionInMarket":          func() proto.Message { return &exchangev2.QuerySubaccountPositionInMarketResponse{} },
+		"/injective.exchange.v2.Query/TraderDerivativeOrders":              func() proto.Message { return &exchangev2.QueryTraderDerivativeOrdersResponse{} },
+		"/injective.exchange.v2.Query/TraderDerivativeTransientOrders":     func() proto.Message { return &exchangev2.QueryTraderDerivativeOrdersResponse{} },
+		"/injective.exchange.v2.Query/TraderSpotTransientOrders":           func() proto.Message { return &exchangev2.QueryTraderSpotOrdersResponse{} },
+		"/injective.exchange.v2.Query/TraderSpotOrders":                    func() proto.Message { return &exchangev2.QueryTraderSpotOrdersResponse{} },
+		"/injective.exchange.v2.Query/PerpetualMarketInfo":                 func() proto.Message { return &exchangev2.QueryPerpetualMarketInfoResponse{} },
+		"/injective.exchange.v2.Query/PerpetualMarketFunding":              func() proto.Message { return &exchangev2.QueryPerpetualMarketFundingResponse{} },
+		"/injective.exchange.v2.Query/MarketVolatility":                    func() proto.Message { return &exchangev2.QueryMarketVolatilityResponse{} },
+		"/injective.exchange.v2.Query/SpotMidPriceAndTOB":                  func() proto.Message { return &exchangev2.QuerySpotMidPriceAndTOBResponse{} },
+		"/injective.exchange.v2.Query/DerivativeMidPriceAndTOB":            func() proto.Message { return &exchangev2.QueryDerivativeMidPriceAndTOBResponse{} },
+		"/injective.exchange.v2.Query/AggregateMarketVolume":               func() proto.Message { return &exchangev2.QueryAggregateMarketVolumeResponse{} },
+		"/injective.exchange.v2.Query/SpotOrderbook":                       func() proto.Message { return &exchangev2.QuerySpotOrderbookResponse{} },
+		"/injective.exchange.v2.Query/DerivativeOrderbook":                 func() proto.Message { return &exchangev2.QueryDerivativeOrderbookResponse{} },
+		"/injective.exchange.v2.Query/MarketAtomicExecutionFeeMultiplier":  func() proto.Message { return &exchangev2.QueryMarketAtomicExecutionFeeMultiplierResponse{} },
 		// Oracle
-		"/injective.oracle.v1beta1.Query/OracleVolatility": &oracletypes.QueryOracleVolatilityResponse{},
-		"/injective.oracle.v1beta1.Query/OraclePrice":      &oracletypes.QueryOraclePriceResponse{},
-		"/injective.oracle.v1beta1.Query/PythPrice":        &oracletypes.QueryPythPriceResponse{},
+		"/injective.oracle.v1beta1.Query/OracleVolatility": func() proto.Message { return &oracletypes.QueryOracleVolatilityResponse{} },
+		"/injective.oracle.v1beta1.Query/OraclePrice":      func() proto.Message { return &oracletypes.QueryOraclePriceResponse{} },
+		"/injective.oracle.v1beta1.Query/PythPrice":        func() proto.Message { return &oracletypes.QueryPythPriceResponse{} },
 		// Auction
-		"/injective.auction.v1beta1.Query/LastAuctionResult":    &auctiontypes.QueryLastAuctionResultResponse{},
-		"/injective.auction.v1beta1.Query/AuctionParams":        &auctiontypes.QueryAuctionParamsResponse{},
-		"/injective.auction.v1beta1.Query/CurrentAuctionBasket": &auctiontypes.QueryCurrentAuctionBasketResponse{},
+		"/injective.auction.v1beta1.Query/LastAuctionResult":    func() proto.Message { return &auctiontypes.QueryLastAuctionResultResponse{} },
+		"/injective.auction.v1beta1.Query/AuctionParams":        func() proto.Message { return &auctiontypes.QueryAuctionParamsResponse{} },
+		"/injective.auction.v1beta1.Query/CurrentAuctionBasket": func() proto.Message { return &auctiontypes.QueryCurrentAuctionBasketResponse{} },
 		// Authz
-		"/cosmos.authz.v1beta1.Query/GranteeGrants": &authz.QueryGranteeGrantsResponse{},
-		"/cosmos.authz.v1beta1.Query/GranterGrants": &authz.QueryGranterGrantsResponse{},
-		"/cosmos.authz.v1beta1.Query/Grants":        &authz.QueryGrantsResponse{},
+		"/cosmos.authz.v1beta1.Query/GranteeGrants": func() proto.Message { return &authz.QueryGranteeGrantsResponse{} },
+		"/cosmos.authz.v1beta1.Query/GranterGrants": func() proto.Message { return &authz.QueryGranterGrantsResponse{} },
+		"/cosmos.authz.v1beta1.Query/Grants":        func() proto.Message { return &authz.QueryGrantsResponse{} },
 	}
 }
 
@@ -145,10 +145,15 @@ func StargateQuerier(
 ) func(ctx sdk.Context, request *wasmvmtypes.StargateQuery) ([]byte, error) {
 	acceptList := getWhitelistedQueries()
 	return func(ctx sdk.Context, request *wasmvmtypes.StargateQuery) ([]byte, error) {
-		protoResponse, accepted := acceptList[request.Path]
+		newResponse, accepted := acceptList[request.Path]
 		if !accepted {
 			return nil, wasmvmtypes.UnsupportedRequest{Kind: fmt.Sprintf("'%s' path is not allowed from the contract", request.Path)}
 		}
+
+		// Construct a fresh response per call. The accept list holds constructors, not shared
+		// instances, so a concurrent off-consensus contract query (gRPC SmartContractState / tx
+		// Simulate) on the same path cannot overwrite this query's response object.
+		protoResponse := newResponse()
 
 		route := queryRouter.Route(request.Path)
 		if route == nil {
@@ -182,6 +187,9 @@ func ConvertProtoToJSONMarshal(cdc codec.Codec, protoResponse proto.Message, bz 
 		return nil, errorsmod.Wrap(err, "to json")
 	}
 
+	// gogoproto Unmarshal merges into protoResponse rather than replacing it, so leave the
+	// message reset on return: callers that reuse a response object must not see stale fields
+	// from a prior call. (StargateQuerier already passes a fresh response per call.)
 	protoResponse.Reset()
 	return bz, nil
 }

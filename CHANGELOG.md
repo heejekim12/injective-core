@@ -34,6 +34,37 @@ Ref: https://keepachangelog.com/en/1.1.0/
 
 # Changelog
 
+## [Unreleased] (going to be v1.20.1)
+
+### Features
+
+- (ibc)  Wire up Cardano's IBC light client module
+
+### Improvements
+
+- (go) Update build env to Go 1.26.4.
+- (cmd) Enforce Injective consensus timeout defaults.
+- (exchange)  Recalibrate fixed-gas costs for exchange order, account, and margin messages based on measured MsgServer gas usage when involving permissioned denoms.
+- (peggy)  Support oracle type selection for Peggy rate limits and backfill existing rate limits to use Pyth during the v1.20.0-beta.2 upgrade
+- (staking)  Remove dust delegations (delegations with positive shares but zero token value)
+
+### Bug Fixes
+
+- (evm) Fix EVM JSON-RPC `eth_feeHistory` next-block base fee and dynamic-fee receipt `effectiveGasPrice`.
+- (exchange)  Guard conditional derivative cancel paths against malformed order arithmetic panics
+- (wasm)  Build a fresh response per Stargate query in the CosmWasm query plugin
+- (wasmbinding)  Set top-level `Metadata.Decimals` in `SetTokenMetadata` translation so ERC20 wrappers report correct decimals for tokenfactory denoms set via wasm bindings.
+- (exchange)  Allow liquidation offsets when residual counterparty position equity can absorb a negative matched payout while staying above maintenance margin at mark.
+
+### CLI Breaking
+
+- (peggy)  `create-rate-limit` now requires `[token-oracle-type]`, and `update-rate-limit` now requires `[new-token-oracle-type]`
+
+
+### API Breaking
+
+- (peggy)  Fields `token_oracle_type` (MsgCreateRateLimit) and `new_token_oracle_type` (MsgUpdateRateLimit) are required. See supported oracle types on chain
+
 ## [v1.20.0](https://github.com/InjectiveFoundation/injective-core/releases/tag/v1.20.0) - 2026-06-04
 
 ### Features
@@ -55,6 +86,7 @@ Ref: https://keepachangelog.com/en/1.1.0/
 - (peggo)  Oracle loop properly updates end block when querying Eth blocks
 - (peggy)  Orchestrators sign oldest unsigned batch as opposed to latest
 - (exchange)  Fix synthetic derivative partial closes to validate residual positions against maintenance margin instead of initial margin
+- (permissions)  Fix quadratic complexity unbounded iteration inside MsgUpdateActorRoles ValidateBasic()
 
 ### Improvements
 

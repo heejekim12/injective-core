@@ -10,8 +10,8 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/pkg/stdcopy"
-	dockertypes "github.com/moby/moby/api/types"
 	"github.com/moby/moby/client"
+	"github.com/strangelove-ventures/interchaintest/v8/dockerutil"
 )
 
 type Container struct {
@@ -52,7 +52,7 @@ func NewFoundryContainer(
 	}
 
 	// Start container
-	if err := dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+	if err := dockerutil.StartContainer(ctx, dockerClient, resp.ID); err != nil {
 		return nil, fmt.Errorf("failed to start deployer container: %w", err)
 	}
 
@@ -68,7 +68,7 @@ func NewFoundryContainer(
 // Exec runs a command in the container
 func (dc *Container) Exec(ctx context.Context, cmd []string) (stdout, stderr string, err error) {
 	// Create exec instance
-	execConfig := dockertypes.ExecConfig{
+	execConfig := container.ExecOptions{
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -80,7 +80,7 @@ func (dc *Container) Exec(ctx context.Context, cmd []string) (stdout, stderr str
 	}
 
 	// Attach to exec
-	resp, err := dc.client.ContainerExecAttach(ctx, execID.ID, dockertypes.ExecStartCheck{})
+	resp, err := dc.client.ContainerExecAttach(ctx, execID.ID, container.ExecStartOptions{})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to attach to exec: %w", err)
 	}

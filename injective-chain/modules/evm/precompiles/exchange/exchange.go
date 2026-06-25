@@ -2,6 +2,7 @@ package exchange
 
 import (
 	"errors"
+	"math"
 	"math/big"
 	"time"
 
@@ -119,6 +120,10 @@ func (*ExchangeContract) Name() string {
 func (ec *ExchangeContract) RequiredGas(input []byte) uint64 {
 	if len(input) < 4 {
 		return 0
+	}
+	// Reject oversized calldata before ABI decoding.
+	if len(input) > types.MAX_ABI_ENCODED_CALLDATA_LENGTH {
+		return math.MaxUint64
 	}
 
 	// base cost to prevent large input size

@@ -1251,9 +1251,36 @@ type offsetProcessResult struct {
 	remainingQuantity  math.LegacyDec
 }
 
+// Negative matched payouts can be absorbed by the residual offsetting position
+// when its mark-price equity remains above maintenance after the margin adjustment.
+func settleNegativeOffsettingPayoutAgainstResidualEquity(
+	position *v2.Position,
+	payout math.LegacyDec,
+	markPrice math.LegacyDec,
+	maintenanceMarginRatio math.LegacyDec,
+) (accountingPayout math.LegacyDec, isValid bool) {
+	if !payout.IsNegative() {
+		return payout, true
+	}
+	if position == nil || !position.Quantity.IsPositive() {
+		return math.LegacyZeroDec(), false
+	}
+
+	adjustedMargin := position.Margin.Add(payout)
+	residualEquity := adjustedMargin.Add(position.GetPayoutFromPnl(markPrice, position.Quantity))
+	residualMaintenanceMargin := markPrice.Mul(position.Quantity).Mul(maintenanceMarginRatio)
+	if residualEquity.LT(residualMaintenanceMargin) {
+		return math.LegacyZeroDec(), false
+	}
+
+	position.Margin = adjustedMargin
+	return math.LegacyZeroDec(), true
+}
+
 func (k DerivativesMsgServer) processOffsettingSubaccounts(
 	ctx sdk.Context,
 	market *v2.DerivativeMarket,
+	markPrice math.LegacyDec,
 	settlementPrice math.LegacyDec,
 	funding *v2.PerpetualMarketFunding,
 	position *v2.Position,
@@ -1300,7 +1327,13 @@ func (k DerivativesMsgServer) processOffsettingSubaccounts(
 			ExecutionPrice:    settlementPrice,
 		}
 		payout, _, _, pnl := offsettingPosition.ApplyPositionDelta(delta, math.LegacyZeroDec())
-		if payout.IsNegative() {
+		accountingPayout, isValid := settleNegativeOffsettingPayoutAgainstResidualEquity(
+			offsettingPosition,
+			payout,
+			markPrice,
+			market.MaintenanceMarginRatio,
+		)
+		if !isValid {
 			continue
 		}
 
@@ -1308,7 +1341,7 @@ func (k DerivativesMsgServer) processOffsettingSubaccounts(
 
 		remaining = remaining.Sub(qty)
 
-		chainPayout := market.NotionalToChainFormat(payout)
+		chainPayout := market.NotionalToChainFormat(accountingPayout)
 		res.marketBalanceDelta = res.marketBalanceDelta.Add(chainPayout.Neg())
 		res.depositDeltas.ApplyUniformDelta(id, chainPayout)
 
@@ -1456,6 +1489,7 @@ func (k DerivativesMsgServer) handleOffsettingPositions(
 	res, err := k.processOffsettingSubaccounts(
 		ctx,
 		market,
+		markPrice,
 		settlementPrice,
 		funding,
 		position,

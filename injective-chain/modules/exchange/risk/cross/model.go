@@ -123,10 +123,6 @@ func (m *Model) ReserveDerivativeOrderMargin(
 		return math.LegacyZeroDec(), err
 	}
 
-	if order.IsConditional() {
-		return math.LegacyZeroDec(), nil
-	}
-
 	if markPriceToCheck.IsNil() || !markPriceToCheck.IsPositive() {
 		return math.LegacyZeroDec(), errors.Wrap(exchangetypes.ErrInvalidOracle, "missing/invalid mark price for cross-margin admission")
 	}
@@ -139,6 +135,11 @@ func (m *Model) ReserveDerivativeOrderMargin(
 		market.GetOracleScaleFactor(),
 	); err != nil {
 		return math.LegacyZeroDec(), err
+	}
+
+	if order.IsConditional() {
+		_ = funds
+		return math.LegacyZeroDec(), nil
 	}
 
 	snapshot, snapErr := m.engine.GetOrBuildCrossPoolSnapshot(ctx, subaccountID, market.GetQuoteDenom(), market.GetQuoteDecimals())

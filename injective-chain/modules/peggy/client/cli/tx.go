@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	cliflags "github.com/InjectiveLabs/injective-core/cli/flags"
+	oracletypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
 )
 
@@ -290,9 +291,9 @@ func RevokeBlacklistEthereumAddresses() *cobra.Command {
 
 func CmdCreateRateLimit() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "create-rate-limit [token-contract] [token-decimals] [token-price-id] [rate-limit-usd] [rate-limit-window]",
+		Use:   "create-rate-limit [token-contract] [token-decimals] [token-price-id] [token-oracle-type] [rate-limit-usd] [rate-limit-window]",
 		Short: "Sets a (withdrawal) rate limit for a specific Peggy asset (admin/gov only)",
-		Args:  cobra.ExactArgs(5),
+		Args:  cobra.ExactArgs(6),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientCtx, err := client.GetClientTxContext(cmd)
 			if err != nil {
@@ -314,13 +315,17 @@ func CmdCreateRateLimit() *cobra.Command {
 			}
 
 			tokenPriceID := args[2]
+			oracleType, err := oracletypes.GetOracleType(args[3])
+			if err != nil {
+				return err
+			}
 
-			rateLimitUSD, err := sdkmath.LegacyNewDecFromStr(args[3])
+			rateLimitUSD, err := sdkmath.LegacyNewDecFromStr(args[4])
 			if err != nil {
 				return errors.Wrap(err, "invalid notional limit")
 			}
 
-			rateLimitWindow, err := strconv.ParseUint(args[4], 10, 64)
+			rateLimitWindow, err := strconv.ParseUint(args[5], 10, 64)
 			if err != nil {
 				return errors.Wrap(err, "invalid notional limit")
 			}
@@ -331,6 +336,7 @@ func CmdCreateRateLimit() *cobra.Command {
 				TokenAddress:    tokenContract.Hex(),
 				TokenDecimals:   uint32(tokenDecimals),
 				TokenPriceId:    tokenPriceID,
+				TokenOracleType: oracleType,
 				RateLimitUsd:    rateLimitUSD,
 				RateLimitWindow: rateLimitWindow,
 			}
@@ -349,9 +355,9 @@ func CmdCreateRateLimit() *cobra.Command {
 
 func CmdUpdateRateLimit() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "update-rate-limit [token-contract] [new-token-price-id] [new-rate-limit-usd] [new-rate-limit-window]",
+		Use:   "update-rate-limit [token-contract] [new-token-price-id] [new-token-oracle-type] [new-rate-limit-usd] [new-rate-limit-window]",
 		Short: "Updates fields of a particular rate limit (admin/gov only)",
-		Args:  cobra.ExactArgs(4),
+		Args:  cobra.ExactArgs(5),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientCtx, err := client.GetClientTxContext(cmd)
 			if err != nil {
@@ -364,13 +370,17 @@ func CmdUpdateRateLimit() *cobra.Command {
 
 			tokenContract := gethcommon.HexToAddress(args[0])
 			newTokenPriceID := args[1]
+			oracleType, err := oracletypes.GetOracleType(args[2])
+			if err != nil {
+				return err
+			}
 
-			newRateLimitUSD, err := sdkmath.LegacyNewDecFromStr(args[2])
+			newRateLimitUSD, err := sdkmath.LegacyNewDecFromStr(args[3])
 			if err != nil {
 				return errors.Wrap(err, "invalid rate limit")
 			}
 
-			newRateLimitWindow, err := strconv.ParseUint(args[3], 10, 64)
+			newRateLimitWindow, err := strconv.ParseUint(args[4], 10, 64)
 			if err != nil {
 				return errors.Wrap(err, "invalid rate limit window")
 			}
@@ -380,6 +390,7 @@ func CmdUpdateRateLimit() *cobra.Command {
 				Authority:          clientCtx.GetFromAddress().String(),
 				TokenAddress:       tokenContract.Hex(),
 				NewTokenPriceId:    newTokenPriceID,
+				NewTokenOracleType: oracleType,
 				NewRateLimitUsd:    newRateLimitUSD,
 				NewRateLimitWindow: newRateLimitWindow,
 			}

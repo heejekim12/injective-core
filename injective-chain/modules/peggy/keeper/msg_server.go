@@ -14,6 +14,7 @@ import (
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/ethereum/go-ethereum/common"
 
+	oracletypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
 )
 
@@ -581,11 +582,17 @@ func (k msgServer) CreateRateLimit(
 		return nil, errors.Wrap(types.ErrDuplicate, "rate limit already exists")
 	}
 
+	price := k.OracleKeeper.GetReferencePrice(ctx, msg.TokenOracleType, msg.TokenPriceId, oracletypes.QuoteUSD)
+	if price == nil || price.IsNil() || !price.IsPositive() {
+		return nil, errors.Wrapf(types.ErrInvalid, "got invalid price for oracle id: %s", msg.TokenPriceId)
+	}
+
 	rateLimit := &types.RateLimit{
 		TokenAddress:    msg.TokenAddress,
 		RateLimitUsd:    msg.RateLimitUsd,
 		RateLimitWindow: msg.RateLimitWindow,
 		TokenPriceId:    msg.TokenPriceId,
+		TokenOracleType: msg.TokenOracleType,
 		TokenDecimals:   msg.TokenDecimals,
 	}
 
@@ -614,14 +621,15 @@ func (k msgServer) UpdateRateLimit(
 		return nil, errors.Wrapf(types.ErrUnknown, "no rate limit found for %s", msg.TokenAddress)
 	}
 
-	priceState := k.OracleKeeper.GetPythPriceState(ctx, common.HexToHash(msg.NewTokenPriceId))
-	if priceState == nil || priceState.PriceState.Price.IsNil() || !priceState.PriceState.Price.IsPositive() {
+	price := k.OracleKeeper.GetReferencePrice(ctx, msg.NewTokenOracleType, msg.NewTokenPriceId, oracletypes.QuoteUSD)
+	if price == nil || price.IsNil() || !price.IsPositive() {
 		return nil, errors.Wrapf(types.ErrInvalid, "got invalid price for oracle id: %s", msg.NewTokenPriceId)
 	}
 
 	rateLimit.RateLimitUsd = msg.NewRateLimitUsd
 	rateLimit.RateLimitWindow = msg.NewRateLimitWindow
 	rateLimit.TokenPriceId = msg.NewTokenPriceId
+	rateLimit.TokenOracleType = msg.NewTokenOracleType
 
 	k.SetRateLimit(ctx, rateLimit)
 

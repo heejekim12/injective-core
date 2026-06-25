@@ -1,13 +1,14 @@
 package types
 
 import (
-	"encoding/hex"
 	"strings"
 
 	sdkerrors "cosmossdk.io/errors"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrortypes "github.com/cosmos/cosmos-sdk/types/errors"
 	gethcommon "github.com/ethereum/go-ethereum/common"
+
+	oracletypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 )
 
 var (
@@ -42,8 +43,12 @@ func (msg *MsgCreateRateLimit) ValidateBasic() error {
 		return sdkerrors.Wrap(sdkerrortypes.ErrInvalidRequest, "token_decimals cannot be zero")
 	}
 
-	if msg.TokenPriceId == "" || !isValidPythID(msg.TokenPriceId) {
+	if strings.TrimSpace(msg.TokenPriceId) == "" {
 		return sdkerrors.Wrapf(sdkerrortypes.ErrInvalidRequest, "invalid token_price_id: %s", msg.TokenPriceId)
+	}
+
+	if msg.TokenOracleType == oracletypes.OracleType_Unspecified {
+		return sdkerrors.Wrap(sdkerrortypes.ErrInvalidRequest, "token_oracle_type cannot be unspecified")
 	}
 
 	if msg.RateLimitUsd.IsNil() || msg.RateLimitUsd.IsZero() {
@@ -78,8 +83,12 @@ func (msg *MsgUpdateRateLimit) ValidateBasic() error {
 		return sdkerrors.Wrapf(sdkerrortypes.ErrInvalidAddress, "invalid token_address: %s", msg.TokenAddress)
 	}
 
-	if msg.NewTokenPriceId == "" || !isValidPythID(msg.NewTokenPriceId) {
+	if strings.TrimSpace(msg.NewTokenPriceId) == "" {
 		return sdkerrors.Wrapf(sdkerrortypes.ErrInvalidRequest, "invalid new_token_price_id: %s", msg.NewTokenPriceId)
+	}
+
+	if msg.NewTokenOracleType == oracletypes.OracleType_Unspecified {
+		return sdkerrors.Wrap(sdkerrortypes.ErrInvalidRequest, "new_token_oracle_type cannot be unspecified")
 	}
 
 	if msg.NewRateLimitUsd.IsNil() || msg.NewRateLimitUsd.IsZero() {
@@ -115,9 +124,4 @@ func (msg *MsgRemoveRateLimit) ValidateBasic() error {
 	}
 
 	return nil
-}
-
-func isValidPythID(s string) bool {
-	_, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
-	return err == nil
 }

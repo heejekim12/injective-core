@@ -25,6 +25,14 @@ const (
 
 	FlagMempoolRecheckEnabled = "mempool.recheck" // controls Comet mempool
 
+	FlagUnsafeConsensusTimeoutPropose        = "unsafe-consensus-timeout-propose"
+	FlagUnsafeConsensusTimeoutProposeDelta   = "unsafe-consensus-timeout-propose-delta"
+	FlagUnsafeConsensusTimeoutPrevote        = "unsafe-consensus-timeout-prevote"
+	FlagUnsafeConsensusTimeoutPrevoteDelta   = "unsafe-consensus-timeout-prevote-delta"
+	FlagUnsafeConsensusTimeoutPrecommit      = "unsafe-consensus-timeout-precommit"
+	FlagUnsafeConsensusTimeoutPrecommitDelta = "unsafe-consensus-timeout-precommit-delta"
+	FlagUnsafeConsensusTimeoutCommit         = "unsafe-consensus-timeout-commit"
+
 	FlagGRPCOnly      = "grpc-only"
 	FlagGRPCEnable    = "grpc.enable"
 	FlagGRPCAddress   = "grpc.address"
@@ -115,6 +123,7 @@ func AddStartNodeFlags(cmd *cobra.Command) {
 	addAPIFlags(cmd)
 	addGRPCFlags(cmd)
 	addMempoolFlags(cmd)
+	addUnsafeConsensusTimeoutFlags(cmd)
 	addStateSyncFlags(cmd)
 	chainstreamtypes.AddCmdFlags(cmd)
 	addJSONRPCFlags(cmd)
@@ -267,6 +276,16 @@ func addInjWebsocketFlags(cmd *cobra.Command) {
 	cmd.Flags().Int(FlagInjWebsocketMaxHeaderBytes, defaultCfg.InjectiveWebsocket.MaxHeaderBytes, "MaxHeaderBytes defines the maximum allowed HTTP header size (in bytes).")
 	cmd.Flags().Int(FlagInjWebsocketMaxRequestBatchSize, defaultCfg.InjectiveWebsocket.MaxRequestBatchSize,
 		"MaxRequestBatchSize defines the maximum number of RPC calls per batch request.")
+}
+
+func addUnsafeConsensusTimeoutFlags(cmd *cobra.Command) {
+	cmd.Flags().String(FlagUnsafeConsensusTimeoutPropose, "", "Unsafe emergency value for CometBFT consensus timeout_propose. Empty uses Injective's hardcoded value.")
+	cmd.Flags().String(FlagUnsafeConsensusTimeoutProposeDelta, "", "Unsafe emergency value for CometBFT consensus timeout_propose_delta. Empty uses Injective's hardcoded value.")
+	cmd.Flags().String(FlagUnsafeConsensusTimeoutPrevote, "", "Unsafe emergency value for CometBFT consensus timeout_prevote. Empty uses Injective's hardcoded value.")
+	cmd.Flags().String(FlagUnsafeConsensusTimeoutPrevoteDelta, "", "Unsafe emergency value for CometBFT consensus timeout_prevote_delta. Empty uses Injective's hardcoded value.")
+	cmd.Flags().String(FlagUnsafeConsensusTimeoutPrecommit, "", "Unsafe emergency value for CometBFT consensus timeout_precommit. Empty uses Injective's hardcoded value.")
+	cmd.Flags().String(FlagUnsafeConsensusTimeoutPrecommitDelta, "", "Unsafe emergency value for CometBFT consensus timeout_precommit_delta. Empty uses Injective's hardcoded value.")
+	cmd.Flags().String(FlagUnsafeConsensusTimeoutCommit, "", "Unsafe emergency value for CometBFT consensus timeout_commit. Empty uses Injective's hardcoded value.")
 }
 
 func addMetricsFlags(cmd *cobra.Command) {

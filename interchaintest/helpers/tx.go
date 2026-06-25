@@ -468,3 +468,35 @@ func BroadcastMsgWithKeyringAsync(
 
 	return response.TxResponse.TxHash, nil
 }
+
+func BroadcastRawTxBytesSync(
+	ctx context.Context,
+	chain *cosmos.CosmosChain,
+	txBytes []byte,
+) (string, error) {
+	tmClient, err := rpchttp.New(chain.GetHostRPCAddress())
+	if err != nil {
+		return "", fmt.Errorf("failed to create CometBFT RPC client: %w", err)
+	}
+	defer func() {
+		if closer, ok := interface{}(tmClient).(interface{ Close() }); ok {
+			closer.Close()
+		}
+	}()
+
+	res, err := tmClient.BroadcastTxSync(ctx, txBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to broadcast raw tx: %w", err)
+	}
+
+	if res.Code != 0 {
+		return "", fmt.Errorf(
+			"tx failed with code %d: codespace=%s log=%s",
+			res.Code,
+			res.Codespace,
+			res.Log,
+		)
+	}
+
+	return fmt.Sprintf("%X", res.Hash), nil
+}

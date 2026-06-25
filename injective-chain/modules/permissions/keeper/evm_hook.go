@@ -120,7 +120,7 @@ func (k *Keeper) callEvmHook(
 	defer func() {
 		// treat panics as hook error
 		if panicErr := recover(); panicErr != nil {
-			err = errors.Wrapf(types.ErrContractHookError, "panic during EVM hook: %v", panicErr)
+			err = errors.Wrapf(types.ErrContractHookError, "panic during EVM hook: %T: %v", panicErr, panicErr)
 		}
 	}()
 

@@ -19,6 +19,16 @@ import (
 	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 )
 
+const (
+	defaultConsensusTimeoutPropose        = 1 * time.Second
+	defaultConsensusTimeoutProposeDelta   = 100 * time.Millisecond
+	defaultConsensusTimeoutPrevote        = 250 * time.Millisecond
+	defaultConsensusTimeoutPrevoteDelta   = 100 * time.Millisecond
+	defaultConsensusTimeoutPrecommit      = 250 * time.Millisecond
+	defaultConsensusTimeoutPrecommitDelta = 100 * time.Millisecond
+	defaultConsensusTimeoutCommit         = 500 * time.Millisecond
+)
+
 // InterceptConfigsPreRunHandler performs a pre-run function for the root daemon
 // application command. It will create a Viper literal and a default server
 // Context. The server Tendermint configuration will either be read and parsed
@@ -114,8 +124,9 @@ func interceptConfigs(rootViper *viper.Viper, conf *tmcfg.Config) error {
 		// overwrite CometBFT defaults with Injective defaults
 		conf.RPC.PprofListenAddress = "localhost:6060"
 		conf.Consensus.PeerGossipSleepDuration = 10 * time.Millisecond
-		conf.P2P.MaxNumOutboundPeers = 40
-		conf.Mempool.Size = 200
+		conf.P2P.MaxNumOutboundPeers = 50
+		conf.Mempool.Size = 500
+		applyInjectiveConsensusTimeouts(conf)
 
 		if err = conf.ValidateBasic(); err != nil {
 			return fmt.Errorf("error in config file: %w", err)
@@ -144,7 +155,15 @@ func interceptConfigs(rootViper *viper.Viper, conf *tmcfg.Config) error {
 		return err
 	}
 
+	applyInjectiveConsensusTimeouts(conf)
+	if err := applyUnsafeConsensusTimeoutOverrides(rootViper, conf); err != nil {
+		return err
+	}
+
 	conf.SetRoot(rootDir)
+	if err := conf.ValidateBasic(); err != nil {
+		return fmt.Errorf("error in config file: %w", err)
+	}
 
 	appCfgFilePath := filepath.Join(configPath, "app.toml")
 	if _, err := os.Stat(appCfgFilePath); os.IsNotExist(err) {
@@ -162,6 +181,88 @@ func interceptConfigs(rootViper *viper.Viper, conf *tmcfg.Config) error {
 
 	if err := rootViper.MergeInConfig(); err != nil {
 		return fmt.Errorf("failed to merge configuration: %w", err)
+	}
+
+	return nil
+}
+
+func applyInjectiveConsensusTimeouts(conf *tmcfg.Config) {
+	conf.Consensus.TimeoutPropose = defaultConsensusTimeoutPropose
+	conf.Consensus.TimeoutProposeDelta = defaultConsensusTimeoutProposeDelta
+	conf.Consensus.TimeoutPrevote = defaultConsensusTimeoutPrevote
+	conf.Consensus.TimeoutPrevoteDelta = defaultConsensusTimeoutPrevoteDelta
+	conf.Consensus.TimeoutPrecommit = defaultConsensusTimeoutPrecommit
+	conf.Consensus.TimeoutPrecommitDelta = defaultConsensusTimeoutPrecommitDelta
+	conf.Consensus.TimeoutCommit = defaultConsensusTimeoutCommit
+	// Stale configs with this deprecated option bypass timeout_commit entirely.
+	conf.Consensus.SkipTimeoutCommit = false
+}
+
+func applyUnsafeConsensusTimeoutOverrides(v *viper.Viper, conf *tmcfg.Config) error {
+	overrides := []struct {
+		flag  string
+		apply func(time.Duration)
+	}{
+		{
+			flag: config.FlagUnsafeConsensusTimeoutPropose,
+			apply: func(timeout time.Duration) {
+				conf.Consensus.TimeoutPropose = timeout
+			},
+		},
+		{
+			flag: config.FlagUnsafeConsensusTimeoutProposeDelta,
+			apply: func(timeout time.Duration) {
+				conf.Consensus.TimeoutProposeDelta = timeout
+			},
+		},
+		{
+			flag: config.FlagUnsafeConsensusTimeoutPrevote,
+			apply: func(timeout time.Duration) {
+				conf.Consensus.TimeoutPrevote = timeout
+			},
+		},
+		{
+			flag: config.FlagUnsafeConsensusTimeoutPrevoteDelta,
+			apply: func(timeout time.Duration) {
+				conf.Consensus.TimeoutPrevoteDelta = timeout
+			},
+		},
+		{
+			flag: config.FlagUnsafeConsensusTimeoutPrecommit,
+			apply: func(timeout time.Duration) {
+				conf.Consensus.TimeoutPrecommit = timeout
+			},
+		},
+		{
+			flag: config.FlagUnsafeConsensusTimeoutPrecommitDelta,
+			apply: func(timeout time.Duration) {
+				conf.Consensus.TimeoutPrecommitDelta = timeout
+			},
+		},
+		{
+			flag: config.FlagUnsafeConsensusTimeoutCommit,
+			apply: func(timeout time.Duration) {
+				conf.Consensus.TimeoutCommit = timeout
+			},
+		},
+	}
+
+	for _, override := range overrides {
+		if !v.IsSet(override.flag) {
+			continue
+		}
+
+		value := strings.TrimSpace(v.GetString(override.flag))
+		if value == "" {
+			return fmt.Errorf("%s cannot be empty", override.flag)
+		}
+
+		timeout, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid %s duration %q: %w", override.flag, value, err)
+		}
+
+		override.apply(timeout)
 	}
 
 	return nil

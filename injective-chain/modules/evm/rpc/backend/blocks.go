@@ -148,6 +148,8 @@ func (b *Backend) GetBlockReceipts(blockNrOrHash rpctypes.BlockNumberOrHash) ([]
 	var (
 		ethTxIndex             int32
 		cumulativeBlockGasUsed uint64
+		baseFee                *big.Int
+		baseFeeLoaded          bool
 	)
 
 	for txIndex, txBz := range resBlock.Block.Txs {
@@ -235,6 +237,14 @@ func (b *Backend) GetBlockReceipts(blockNrOrHash rpctypes.BlockNumberOrHash) ([]
 				b.logger.Warn("failed to parse logs", "hash", txHash, "error", err.Error())
 			}
 
+			if txData.Type() == ethtypes.DynamicFeeTxType && !baseFeeLoaded {
+				baseFee, err = b.BaseFee(blockRes)
+				if err != nil {
+					baseFee = nil
+				}
+				baseFeeLoaded = true
+			}
+
 			receipt := map[string]any{
 				// Consensus fields: These fields are defined by the Yellow Paper
 				"status":            status,
@@ -253,7 +263,7 @@ func (b *Backend) GetBlockReceipts(blockNrOrHash rpctypes.BlockNumberOrHash) ([]
 				"transactionIndex": hexutil.Uint64(ethTxIndex),
 
 				// https://github.com/foundry-rs/foundry/issues/7640
-				"effectiveGasPrice": (*hexutil.Big)(txData.GasPrice()),
+				"effectiveGasPrice": (*hexutil.Big)(effectiveGasPrice(txData, baseFee)),
 
 				// sender and receiver (contract or EOA) addresses
 				"from": from,
@@ -268,11 +278,6 @@ func (b *Backend) GetBlockReceipts(blockNrOrHash rpctypes.BlockNumberOrHash) ([]
 			// If the ContractAddress is 20 0x0 bytes, assume it is not a contract creation.
 			if txData.To() == nil {
 				receipt["contractAddress"] = crypto.CreateAddress(from, txData.Nonce())
-			}
-
-			if txData.Type() == ethtypes.DynamicFeeTxType {
-				price := txData.GasPrice()
-				receipt["effectiveGasPrice"] = hexutil.Big(*price)
 			}
 
 			receipts = append(receipts, receipt)

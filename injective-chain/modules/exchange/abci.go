@@ -243,7 +243,7 @@ func (h *BlockHandler) EndBlocker(ctx sdk.Context) {
 
 	/* =========== Stage 9: Invalidate conditional RO orders if no locked margin left =========== */
 	h.k.IterateInvalidConditionalOrderFlags(ctx, func(marketID, subaccountID common.Hash, isBuy bool) (stop bool) {
-		h.k.InvalidateConditionalOrdersIfNoMarginLocked(ctx, marketID, subaccountID, false, &isBuy, marketCache)
+		h.invalidateConditionalOrdersIfNoMarginLocked(ctx, marketID, subaccountID, isBuy, marketCache)
 		return false
 	})
 
@@ -422,17 +422,26 @@ func (h *BlockHandler) cancelTriggeredMarketOrdersForMarket(ctx sdk.Context, tri
 	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.cancelTriggeredMarketOrdersForMarket")()
 
 	for i, marketOrder := range triggeredMarket.MarketOrders {
+		if marketOrder == nil {
+			continue
+		}
+
+		subaccID := marketOrder.OrderInfo.SubaccountID()
+
 		// Skip CM-paused subaccounts: the order stays as a conditional in state and will
 		// re-trigger naturally when the pause is lifted. Deleting it here would permanently
 		// lose the order since the subsequent creation attempt would also fail.
-		if h.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, marketOrder.OrderInfo.SubaccountID()) != nil {
+		if h.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, subaccID) != nil {
 			triggeredMarket.MarketOrders[i] = nil
 			continue
 		}
 
-		if err := h.k.CancelConditionalDerivativeMarketOrder(
-			ctx, triggeredMarket.Market, marketOrder.OrderInfo.SubaccountID(), nil, marketOrder.Hash(),
-		); err != nil {
+		if panicked, err := h.k.CancelConditionalDerivativeMarketOrderWithCache(
+			ctx, triggeredMarket.Market, subaccID, nil, marketOrder.Hash(),
+		); panicked {
+			triggeredMarket.MarketOrders[i] = nil
+			ctx.Logger().Error("Cancelling of conditional market order panicked")
+		} else if err != nil {
 			// should never happen
 			// remove the order from the array of orders to trigger since we couldn't cancel it
 			triggeredMarket.MarketOrders[i] = nil
@@ -579,17 +588,24 @@ func (h *BlockHandler) cancelConditionalOrdersForMarket(ctx sdk.Context, trigger
 	defer h.k.Meter(ctx).FuncTiming(&ctx, "BlockHandler.cancelConditionalOrdersForMarket")()
 
 	for i, limitOrder := range triggeredMarket.LimitOrders {
+		if limitOrder == nil {
+			continue
+		}
+
+		subaccID := limitOrder.OrderInfo.SubaccountID()
+
 		// Skip CM-paused subaccounts: the order stays as a conditional in state and will
 		// re-trigger naturally when the pause is lifted. Deleting it here would permanently
 		// lose the order since the subsequent creation attempt would also fail.
-		if h.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, limitOrder.OrderInfo.SubaccountID()) != nil {
+		if h.k.RiskEngine().CheckCrossMarginEmergencyPause(ctx, subaccID) != nil {
 			triggeredMarket.LimitOrders[i] = nil
 			continue
 		}
 
-		if err := h.k.CancelConditionalDerivativeLimitOrder(
-			ctx, triggeredMarket.Market, limitOrder.OrderInfo.SubaccountID(), nil, limitOrder.Hash(),
-		); err != nil {
+		if panicked, err := h.cancelConditionalLimitOrderWithRecover(ctx, triggeredMarket, limitOrder); panicked {
+			triggeredMarket.LimitOrders[i] = nil
+			ctx.Logger().Error("Cancelling of conditional limit order panicked")
+		} else if err != nil {
 			// should never happen
 			// remove the order from the array of orders to trigger since we couldn't cancel it
 			triggeredMarket.LimitOrders[i] = nil
@@ -604,6 +620,47 @@ func (h *BlockHandler) cancelConditionalOrdersForMarket(ctx sdk.Context, trigger
 	// Deleting the indicator would be unsafe: it's keyed by (marketID, side) and would
 	// also suppress stage-3 processing for unrelated transient limit orders placed earlier
 	// in the block on the same market/side.
+}
+
+func (h *BlockHandler) cancelConditionalLimitOrderWithRecover(
+	ctx sdk.Context,
+	triggeredMarket *v2.TriggeredOrdersInMarket,
+	limitOrder *v2.DerivativeLimitOrder,
+) (panicked bool, err error) {
+	cacheCtx, writeCache := ctx.CacheContext()
+	subaccID := limitOrder.OrderInfo.SubaccountID()
+
+	func() {
+		defer RecoverEndBlocker(ctx, &panicked)
+		err = h.k.CancelConditionalDerivativeLimitOrder(
+			cacheCtx, triggeredMarket.Market, subaccID, nil, limitOrder.Hash(),
+		)
+	}()
+
+	if panicked || err != nil {
+		return panicked, err
+	}
+
+	writeCache()
+	return false, nil
+}
+
+func (h *BlockHandler) invalidateConditionalOrdersIfNoMarginLocked(
+	ctx sdk.Context,
+	marketID, subaccountID common.Hash,
+	isBuy bool,
+	marketCache map[common.Hash]*v2.DerivativeMarket,
+) {
+	panicked := false
+
+	func() {
+		defer RecoverEndBlocker(ctx, &panicked)
+		h.k.InvalidateConditionalOrdersIfNoMarginLocked(ctx, marketID, subaccountID, false, &isBuy, marketCache)
+	}()
+
+	if panicked {
+		ctx.Logger().Error("Invalidating conditional orders panicked")
+	}
 }
 
 func (h *BlockHandler) handleTriggeringConditionalLimitOrders(ctx sdk.Context, triggeredMarketsAndOrders []*v2.TriggeredOrdersInMarket) {

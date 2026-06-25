@@ -58,6 +58,26 @@ func QueryDelegation(
 ) stakingtypes.Delegation {
 	t.Helper()
 
+	delegation, ok := QueryDelegationOrNil(t, ctx, chain, delegatorAddr, valoperAddr)
+	require.True(t, ok, "delegation not found for delegator %s validator %s", delegatorAddr, valoperAddr)
+
+	return delegation
+}
+
+// QueryDelegationOrNil queries a delegation and returns it along with a found flag.
+// It returns (zero, false) when no delegation exists for the (delegator, validator) pair,
+// which is useful for asserting that a delegation was removed (e.g. after a dust cleanup).
+//
+//revive:disable:context-as-argument // matches the (t, ctx, chain) convention of the sibling helpers in this file
+func QueryDelegationOrNil(
+	t *testing.T,
+	ctx context.Context,
+	chain *cosmos.CosmosChain,
+	delegatorAddr string,
+	valoperAddr string,
+) (stakingtypes.Delegation, bool) {
+	t.Helper()
+
 	conn, err := grpc.NewClient(chain.GetHostGRPCAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err, "failed to create gRPC connection")
 	defer conn.Close()
@@ -67,8 +87,13 @@ func QueryDelegation(
 		DelegatorAddr: delegatorAddr,
 		ValidatorAddr: valoperAddr,
 	})
-	require.NoError(t, err, "error querying delegation")
-	require.NotNil(t, resp.DelegationResponse, "delegation response is nil")
+	if err != nil {
+		// The staking query returns a "NotFound" gRPC error when the delegation is absent.
+		return stakingtypes.Delegation{}, false
+	}
+	if resp.GetDelegationResponse() == nil {
+		return stakingtypes.Delegation{}, false
+	}
 
-	return resp.DelegationResponse.Delegation
+	return resp.DelegationResponse.Delegation, true
 }

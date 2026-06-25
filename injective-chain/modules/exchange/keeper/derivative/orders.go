@@ -1111,6 +1111,43 @@ func (k DerivativeKeeper) CancelConditionalDerivativeLimitOrder(
 	return nil
 }
 
+func (k DerivativeKeeper) recoverConditionalCancelPanic(
+	ctx sdk.Context,
+	operation string,
+	orderHash common.Hash,
+	panicked *bool,
+) {
+	if r := recover(); r != nil {
+		k.Logger(ctx).Error(operation+" panicked", "orderHash", orderHash.Hex(), "panic", r)
+		*panicked = true
+		return
+	}
+
+	*panicked = false
+}
+
+func (k DerivativeKeeper) cancelConditionalDerivativeLimitOrderWithCache(
+	ctx sdk.Context,
+	market v2.MarketI,
+	subaccountID common.Hash,
+	isTriggerPriceHigher *bool,
+	orderHash common.Hash,
+) (panicked bool, err error) {
+	cacheCtx, writeCache := ctx.CacheContext()
+
+	func() {
+		defer k.recoverConditionalCancelPanic(ctx, "CancelConditionalDerivativeLimitOrder", orderHash, &panicked)
+		err = k.CancelConditionalDerivativeLimitOrder(cacheCtx, market, subaccountID, isTriggerPriceHigher, orderHash)
+	}()
+
+	if panicked || err != nil {
+		return panicked, err
+	}
+
+	writeCache()
+	return false, nil
+}
+
 func (k DerivativeKeeper) SetConditionalDerivativeLimitOrderWithMetadata(
 	ctx sdk.Context,
 	order *v2.DerivativeLimitOrder,
@@ -1254,7 +1291,8 @@ func (k DerivativeKeeper) cancelConditionalDerivativeLimitOrders(
 
 	for _, hash := range orderHashes {
 		triggerPriceHigher := isTriggerPriceHigher
-		if err := k.CancelConditionalDerivativeLimitOrder(ctx, market, subaccountID, &triggerPriceHigher, hash); err != nil {
+		panicked, err := k.cancelConditionalDerivativeLimitOrderWithCache(ctx, market, subaccountID, &triggerPriceHigher, hash)
+		if panicked || err != nil {
 			continue
 		}
 	}
@@ -1370,6 +1408,30 @@ func (k DerivativeKeeper) CancelConditionalDerivativeMarketOrder(
 	})
 
 	return nil
+}
+
+// CancelConditionalDerivativeMarketOrderWithCache cancels one conditional derivative market order in an isolated
+// cache context and reports recovered panics without committing partial state.
+func (k DerivativeKeeper) CancelConditionalDerivativeMarketOrderWithCache(
+	ctx sdk.Context,
+	market v2.MarketI,
+	subaccountID common.Hash,
+	isTriggerPriceHigher *bool,
+	orderHash common.Hash,
+) (panicked bool, err error) {
+	cacheCtx, writeCache := ctx.CacheContext()
+
+	func() {
+		defer k.recoverConditionalCancelPanic(ctx, "CancelConditionalDerivativeMarketOrder", orderHash, &panicked)
+		err = k.CancelConditionalDerivativeMarketOrder(cacheCtx, market, subaccountID, isTriggerPriceHigher, orderHash)
+	}()
+
+	if panicked || err != nil {
+		return panicked, err
+	}
+
+	writeCache()
+	return false, nil
 }
 
 // CancelAllDerivativeMarketOrders cancels all of the derivative market orders for a given marketID.
@@ -1577,13 +1639,25 @@ func (k DerivativeKeeper) CancelAllConditionalDerivativeOrders(
 	orderbook := k.GetAllConditionalDerivativeOrdersUpToMarkPrice(ctx, marketID, nil)
 
 	for _, limitOrder := range orderbook.GetLimitOrders() {
-		if err := k.CancelConditionalDerivativeLimitOrder(ctx, market, limitOrder.SubaccountID(), nil, limitOrder.Hash()); err != nil {
+		panicked, err := k.cancelConditionalDerivativeLimitOrderWithCache(ctx, market, limitOrder.SubaccountID(), nil, limitOrder.Hash())
+		if panicked {
+			k.Logger(ctx).Error(
+				"CancelConditionalDerivativeLimitOrder panicked during CancelAllConditionalDerivativeOrders",
+				"orderHash", limitOrder.Hash().Hex(),
+			)
+		} else if err != nil {
 			k.Logger(ctx).Error("CancelConditionalDerivativeLimitOrder failed during CancelAllConditionalDerivativeOrders:", err)
 		}
 	}
 
 	for _, marketOrder := range orderbook.GetMarketOrders() {
-		if err := k.CancelConditionalDerivativeMarketOrder(ctx, market, marketOrder.SubaccountID(), nil, marketOrder.Hash()); err != nil {
+		panicked, err := k.CancelConditionalDerivativeMarketOrderWithCache(ctx, market, marketOrder.SubaccountID(), nil, marketOrder.Hash())
+		if panicked {
+			k.Logger(ctx).Error(
+				"CancelConditionalDerivativeMarketOrder panicked during CancelAllConditionalDerivativeOrders",
+				"orderHash", marketOrder.Hash().Hex(),
+			)
+		} else if err != nil {
 			k.Logger(ctx).Error("CancelConditionalDerivativeMarketOrder failed during CancelAllConditionalDerivativeOrders:", err)
 		}
 	}
@@ -1742,7 +1816,13 @@ func (k DerivativeKeeper) cancelConditionalDerivativeMarketOrders(
 
 	for _, hash := range orderHashes {
 		triggerPriceHigher := isTriggerPriceHigher
-		if err := k.CancelConditionalDerivativeMarketOrder(ctx, market, subaccountID, &triggerPriceHigher, hash); err != nil {
+		if panicked, err := k.CancelConditionalDerivativeMarketOrderWithCache(ctx, market, subaccountID, &triggerPriceHigher, hash); panicked {
+			k.Logger(ctx).Error(
+				"CancelConditionalDerivativeMarketOrder panicked during cancelConditionalDerivativeMarketOrders",
+				"orderHash", hash.Hex(),
+			)
+			continue
+		} else if err != nil {
 			continue
 		}
 	}
@@ -2814,7 +2894,11 @@ func (k DerivativeKeeper) checkAndCancelConditionalDerivativeOrder(
 	if shouldCheckMarketOrder {
 		order, direction := k.GetConditionalDerivativeMarketOrderBySubaccountIDAndHash(ctx, marketID, isBuy, subaccountID, orderHash)
 		if order != nil {
-			return k.CancelConditionalDerivativeMarketOrder(ctx, market, subaccountID, &direction, orderHash)
+			panicked, err := k.CancelConditionalDerivativeMarketOrderWithCache(ctx, market, subaccountID, &direction, orderHash)
+			if panicked {
+				return types.ErrOrderDoesntExist.Wrap("Conditional Derivative Market Order cancel panicked")
+			}
+			return err
 		}
 
 		if !shouldCheckLimitOrder {
@@ -2831,7 +2915,11 @@ func (k DerivativeKeeper) checkAndCancelConditionalDerivativeOrder(
 		return types.ErrOrderDoesntExist.Wrap("Derivative Limit Order doesn't exist")
 	}
 
-	return k.CancelConditionalDerivativeLimitOrder(ctx, market, subaccountID, &direction, orderHash)
+	panicked, err := k.cancelConditionalDerivativeLimitOrderWithCache(ctx, market, subaccountID, &direction, orderHash)
+	if panicked {
+		return types.ErrOrderDoesntExist.Wrap("Conditional Derivative Limit Order cancel panicked")
+	}
+	return err
 }
 
 //revive:disable:cognitive-complexity // this function has slightly higher complexity but is still readable

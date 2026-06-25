@@ -28,6 +28,7 @@ import (
 	tokenfactorytypes "github.com/InjectiveLabs/sdk-go/chain/tokenfactory/types"
 	wasmxtypes "github.com/InjectiveLabs/sdk-go/chain/wasmx/types"
 	"github.com/avast/retry-go/v4"
+	probabilistic "github.com/cardano-foundation/cardano-ibc-incubator/cosmos/cardano-probabilistic-light-client-v8"
 	cosmtestutil "github.com/cosmos/cosmos-sdk/types/module/testutil"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	authztypes "github.com/cosmos/cosmos-sdk/x/authz"
@@ -106,6 +107,7 @@ func injectiveEncoding() *cosmtestutil.TestEncodingConfig {
 	// TODO: types dependency shall be moved to sdk-go
 	evmtypes.RegisterInterfaces(cfg.InterfaceRegistry)
 	erc20types.RegisterInterfaces(cfg.InterfaceRegistry)
+	probabilistic.RegisterInterfaces(cfg.InterfaceRegistry)
 
 	return &cfg
 }

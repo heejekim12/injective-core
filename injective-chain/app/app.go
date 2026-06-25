@@ -27,6 +27,7 @@ import (
 	"github.com/CosmWasm/wasmd/x/wasm"
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
+	probabilistic "github.com/cardano-foundation/cardano-ibc-incubator/cosmos/cardano-probabilistic-light-client-v8"
 	abci "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/libs/pubsub"
 	dbm "github.com/cosmos/cosmos-db"
@@ -241,6 +242,7 @@ var (
 
 		evm.AppModuleBasic{},
 		erc20module.AppModuleBasic{},
+		probabilistic.AppModuleBasic{},
 	)
 
 	// module account permissions
@@ -1544,6 +1546,7 @@ func (app *InjectiveApp) initManagers() { //nolint:revive // this is fine
 		// EVM app modules
 		evm.NewAppModule(app.EvmKeeper, app.AccountKeeper, app.GetSubspace(evmtypes.ModuleName)),
 		erc20module.NewAppModule(app.ERC20Keeper),
+		probabilistic.NewAppModule(),
 	)
 
 	// BasicModuleManager defines the module BasicManager is in charge of setting up basic,

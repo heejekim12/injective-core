@@ -20,7 +20,7 @@ Validators can find a step-by-step guide on the upgrade procedure in the long-fo
 | injectived  | $${{TAG}}   |`$${{SOURCE_COMMIT}}`|
 | peggo  | $${{TAG}} |`$${{SOURCE_COMMIT}}`|
 
-`Go version 1.26.2`
+`Go version 1.26.4`
 
 Verify you're using the correct version by running the below commands:
 
@@ -39,11 +39,11 @@ Results:
 ```
 [A] injectived
 Version $${{TAG}} ($${{SOURCE_COMMIT}})
-Compiled at $${{INJECTIVED_COMPILED_AT}} using Go go1.26.2 (amd64)
+Compiled at $${{INJECTIVED_COMPILED_AT}} using Go go1.26.4 (amd64)
 
 [B] peggo
 Version $${{TAG}} ($${{SOURCE_COMMIT}})
-Compiled at $${{PEGGO_COMPILED_AT}} using Go go1.26.2 (amd64)
+Compiled at $${{PEGGO_COMPILED_AT}} using Go go1.26.4 (amd64)
 ```
 
 ### 🐳 Docker

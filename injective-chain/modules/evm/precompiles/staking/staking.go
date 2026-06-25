@@ -2,6 +2,7 @@ package staking
 
 import (
 	"errors"
+	"math"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -101,6 +102,10 @@ func (*StakingContract) Name() string {
 func (sc *StakingContract) RequiredGas(input []byte) uint64 {
 	if len(input) < 4 {
 		return 0
+	}
+	// Reject oversized calldata before ABI decoding.
+	if len(input) > types.MAX_ABI_ENCODED_CALLDATA_LENGTH {
+		return math.MaxUint64
 	}
 
 	// base cost to prevent large input size

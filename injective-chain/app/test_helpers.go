@@ -23,7 +23,10 @@ import (
 	"github.com/InjectiveLabs/injective-core/injective-chain/app/config"
 )
 
-var setupMutex = new(sync.Mutex)
+var (
+	setupMutex                = new(sync.Mutex)
+	setupDefaultBondDenomOnce sync.Once
+)
 
 // DefaultConsensusParams defines the default Tendermint consensus params used in
 // InjectiveApp testing.
@@ -58,7 +61,9 @@ func Setup(isCheckTx bool, cfg *config.Config) *InjectiveApp {
 		cfg = config.DefaultConfig()
 	}
 
-	sdk.DefaultBondDenom = "inj"
+	setupDefaultBondDenomOnce.Do(func() {
+		sdk.DefaultBondDenom = "inj"
+	})
 	cfg.Set("trace", true)         //nolint
 	cfg.Pruning = "nothing"        // Disable pruning for tests to prevent goroutine leaks
 	cfg.IAVLDisableFastNode = true // Disable IAVL fast node for tests

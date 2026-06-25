@@ -329,6 +329,12 @@ func (k WasmKeeper) HandlePositionTransferAction(
 
 	receiverTradingFee := markPrice.Mul(action.Quantity).Mul(market.TakerFeeRate)
 
+	sourceDepositBefore := *k.GetDeposit(ctx, action.SourceSubaccountID, market.QuoteDenom)
+	destinationDepositBefore := *k.GetDeposit(ctx, action.DestinationSubaccountID, market.QuoteDenom)
+
+	actionCtx, writeAction := ctx.CacheContext()
+	ctx = actionCtx
+
 	if err := k.applyPositionTransferMarketBalanceDelta(ctx, action.MarketID, market, payout, closeExecutionMargin); err != nil {
 		return err
 	}
@@ -374,6 +380,19 @@ func (k WasmKeeper) HandlePositionTransferAction(
 		return err
 	}
 
+	if !sourceIsCross {
+		sourceDepositAfter := *k.GetDeposit(ctx, action.SourceSubaccountID, market.QuoteDenom)
+		if err := ensurePositionTransferDepositNotMoreNegative("source", action.SourceSubaccountID, market.QuoteDenom, sourceDepositBefore, sourceDepositAfter); err != nil {
+			return err
+		}
+	}
+	if !destIsCross {
+		destinationDepositAfter := *k.GetDeposit(ctx, action.DestinationSubaccountID, market.QuoteDenom)
+		if err := ensurePositionTransferDepositNotMoreNegative("destination", action.DestinationSubaccountID, market.QuoteDenom, destinationDepositBefore, destinationDepositAfter); err != nil {
+			return err
+		}
+	}
+
 	events.Emit(ctx, k.BaseKeeper, &v2.EventPositionTransfer{
 		MarketId:                action.MarketID.Hex(),
 		SourceSubaccountId:      action.SourceSubaccountID.Hex(),
@@ -381,7 +400,36 @@ func (k WasmKeeper) HandlePositionTransferAction(
 		Quantity:                action.Quantity,
 	})
 
+	writeAction()
 	return nil
+}
+
+func ensurePositionTransferDepositNotMoreNegative(
+	side string,
+	subaccountID common.Hash,
+	denom string,
+	before, after v2.Deposit,
+) error {
+	if !depositBecameMoreNegative(before, after) {
+		return nil
+	}
+
+	return errors.Wrapf(
+		types.ErrInsufficientDeposit,
+		"%s subaccount %s deposit in denom %s became more negative",
+		side,
+		subaccountID.Hex(),
+		denom,
+	)
+}
+
+func depositBecameMoreNegative(before, after v2.Deposit) bool {
+	return balanceBecameMoreNegative(before.AvailableBalance, after.AvailableBalance) ||
+		balanceBecameMoreNegative(before.TotalBalance, after.TotalBalance)
+}
+
+func balanceBecameMoreNegative(before, after math.LegacyDec) bool {
+	return after.IsNegative() && after.LT(before)
 }
 
 type Direction uint8

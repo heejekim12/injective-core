@@ -68,6 +68,9 @@ image:
 image-foundry-deployer:
 	docker build -t injectivelabs/injective-foundry-deployer:local -f interchaintest/foundry/Dockerfile .
 
+image-caribic:
+	docker build -t injectivelabs/injective-caribic:local -f interchaintest/caribic/Dockerfile .
+
 push:
 	docker push $(IMAGE_NAME):$(GIT_COMMIT)
 	docker push $(IMAGE_NAME):latest
@@ -113,7 +116,7 @@ install-ci:
 	@rm pkgs-injectived.txt pkgs-peggo.txt
 
 .PHONY: init install install-ci install-injectived install-peggo
-.PHONY: image image-foundry-deployer push gen lint lint-last-commit test mock cover
+.PHONY: image image-foundry-deployer image-caribic push gen lint lint-last-commit test mock cover
 
 mock: tests/mocks.go
 	go install github.com/golang/mock/mockgen@latest
@@ -180,6 +183,16 @@ ictest-ibchooks: rm-testcache
 	rm -rf interchaintest/coverage/TestInjectiveIBCHooks
 	cd interchaintest && go test -v -run TestInjectiveIBCHooks .
 	./scripts/coverage-html.sh interchaintest/coverage/TestInjectiveIBCHooks
+
+ictest-cardano-ibc-client: rm-testcache
+	rm -rf interchaintest/coverage/Test_CardanoProbabilisticClientCanBeCreated
+	cd interchaintest && go test -timeout 30m -v -run Test_CardanoProbabilisticClientCanBeCreated .
+	./scripts/coverage-html.sh interchaintest/coverage/Test_CardanoProbabilisticClientCanBeCreated
+
+ictest-cardano-full-token-swap: rm-testcache
+	rm -rf interchaintest/coverage/Test_CardanoIBC_FullTokenSwap
+	cd interchaintest && go test -timeout 90m -v -run Test_CardanoIBC_FullTokenSwap .
+	./scripts/coverage-html.sh interchaintest/coverage/Test_CardanoIBC_FullTokenSwap
 
 ictest-permissions-wasm-hook: rm-testcache
 	rm -rf interchaintest/coverage/TestPermissionedDenomWasmHookCall
@@ -307,7 +320,7 @@ ictest-auction-chain-halt-protection: rm-testcache
 	./scripts/coverage-html.sh interchaintest/coverage/Test_AuctionChainHaltProtection
 
 .PHONY: rm-testcache rm-ic-coverage
-.PHONY: ictest-all ictest-basic ictest-upgrade ictest-ibchooks ictest-permissions-wasm-hook ictest-pfm ictest-lanes
+.PHONY: ictest-all ictest-basic ictest-upgrade ictest-ibchooks ictest-cardano-ibc-client ictest-cardano-full-token-swap ictest-permissions-wasm-hook ictest-pfm ictest-lanes
 .PHONY: ictest-fixed-gas ictest-fixed-gas-regression ictest-fixed-gas-cross-margin ictest-peggo ictest-peggo-ibc ictest-peggo-rate-limit ictest-evm ictest-circle
 .PHONY: ictest-downtime-detector ictest-chainstream ictest-chainstream-websocket ictest-validator-jailed ictest-wasm-fees-to-auction ictest-chainlink-data-streams
 .PHONY: ictest-ante-multisig ictest-peggy-bad-signature-replay ictest-peggo-unbonded-valset-confirm-test ictest-peggy-valset-slashing-rejoin ictest-peggy-confirm-batch-unbonded ictest-auction-chain-halt-protection ictest-oracle-morpho

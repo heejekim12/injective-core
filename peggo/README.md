@@ -13,7 +13,7 @@ Important Commands:
 
 ## Installation
 
-Get yourself `Go 1.26.2` at <https://golang.org/dl/> first, then:
+Get yourself `Go 1.26.4` at <https://golang.org/dl/> first, then:
 
 ```
 go get github.com/InjectiveLabs/peggo/orchestrator/cmd/...

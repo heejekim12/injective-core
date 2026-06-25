@@ -163,10 +163,21 @@ func (k *Keeper) GetProviderPriceState(ctx sdk.Context, provider, symbol string)
 		return nil
 	}
 
-	var state types.PriceState
-	k.cdc.MustUnmarshal(bz, &state)
+	return k.unmarshalProviderPriceState(symbol, bz)
+}
 
-	return &types.ProviderPriceState{Symbol: symbol, State: &state}
+func (k *Keeper) unmarshalProviderPriceState(symbol string, bz []byte) *types.ProviderPriceState {
+	var state types.PriceState
+	if err := k.cdc.Unmarshal(bz, &state); err == nil {
+		return &types.ProviderPriceState{Symbol: symbol, State: &state}
+	}
+
+	var legacyState types.ProviderPriceState
+	if err := k.cdc.Unmarshal(bz, &legacyState); err != nil || legacyState.State == nil {
+		return nil
+	}
+
+	return &types.ProviderPriceState{Symbol: symbol, State: legacyState.State}
 }
 
 func (k *Keeper) SetProviderPriceState(ctx sdk.Context, provider string, providerPriceState *types.ProviderPriceState) {
@@ -192,12 +203,9 @@ func (k *Keeper) GetProviderPriceStates(ctx sdk.Context, provider string) []*typ
 
 	var providerPriceStates []*types.ProviderPriceState
 	chaintypes.IterateSafe(priceStore.Iterator(nil, nil), func(key, val []byte) bool {
-		var state types.PriceState
-		k.cdc.MustUnmarshal(val, &state)
-		providerPriceStates = append(providerPriceStates, &types.ProviderPriceState{
-			Symbol: string(key),
-			State:  &state,
-		})
+		if state := k.unmarshalProviderPriceState(string(key), val); state != nil {
+			providerPriceStates = append(providerPriceStates, state)
+		}
 		return false
 	})
 

@@ -10,6 +10,10 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
+const (
+	MAX_ABI_ENCODED_CALLDATA_LENGTH = 10_000
+)
+
 func CastAddress(input any) (sdk.AccAddress, error) {
 	ethAddr, ok := input.(common.Address)
 	if !ok {

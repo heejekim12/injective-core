@@ -91,7 +91,7 @@ func (k SubaccountKeeper) SetDepositOrSendToBank(
 			sdk.NewCoins(sdk.NewCoin(denom, amountToSendToBank)),
 		)
 		if err != nil {
-			k.Logger(ctx).Error(
+			k.Logger(ctx).Debug(
 				"CRITICAL: an error occurred when sending default subaccount funds to bank",
 				"error", err,
 				"subaccountID", subaccountID.Hex(),
@@ -143,7 +143,7 @@ func (k SubaccountKeeper) ChargeBank(
 	}
 
 	if err := k.bank.SendCoinsFromAccountToModule(ctx, account, types.ModuleName, sdk.NewCoins(coin)); err != nil {
-		k.Logger(ctx).Error("bank charge failed", "account", account.String(), "coin", coin.String())
+		k.Logger(ctx).Debug("bank charge failed", "account", account.String(), "coin", coin.String())
 		return errors.Wrap(err, "bank charge failed")
 	}
 

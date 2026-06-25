@@ -38,7 +38,7 @@ type Keeper struct {
 	DistKeeper        distrkeeper.Keeper
 	SlashingKeeper    types.SlashingKeeper
 	exchangeMsgServer exchangetypes.MsgServer
-	OracleKeeper      OracleKeeper
+	OracleKeeper      types.OracleKeeper
 
 	AttestationHandler interface {
 		Handle(sdk.Context, types.EthereumClaim) error
@@ -60,7 +60,7 @@ func NewKeeper(
 	slashingKeeper types.SlashingKeeper,
 	distKeeper distrkeeper.Keeper,
 	exchangeKeeper *exchangekeeper.Keeper,
-	oracleKeeper OracleKeeper,
+	oracleKeeper types.OracleKeeper,
 	authority string,
 	accountKeeper keeper.AccountKeeper,
 ) Keeper {

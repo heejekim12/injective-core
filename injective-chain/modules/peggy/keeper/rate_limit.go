@@ -11,6 +11,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	gethcommon "github.com/ethereum/go-ethereum/common"
 
+	oracletypes "github.com/InjectiveLabs/injective-core/injective-chain/modules/oracle/types"
 	"github.com/InjectiveLabs/injective-core/injective-chain/modules/peggy/types"
 	chaintypes "github.com/InjectiveLabs/injective-core/injective-chain/types"
 )
@@ -62,15 +63,12 @@ func (k *Keeper) CheckRateLimit(
 	quantity := entireWithdrawAmountSoFar.ToLegacyDec()
 	quantity = quantity.Quo(sdkmath.LegacyNewDec(10).Power(uint64(rateLimit.TokenDecimals)))
 
-	// Pyth price IDs encode the quote denomination (e.g. a BTC/USD price ID always stores a USD price),
-	// so PriceState.Price is already USD-denominated and can be compared directly to RateLimitUsd.
-	pythPriceState := k.OracleKeeper.GetPythPriceState(ctx, gethcommon.HexToHash(rateLimit.TokenPriceId))
-	if pythPriceState == nil || pythPriceState.PriceState.Price.IsNil() || !pythPriceState.PriceState.Price.IsPositive() {
-		// todo(dusan): perform check during MsgServer CreateRateLimit?
-		return errors.New("nil Pyth price")
+	price := k.OracleKeeper.GetReferencePrice(ctx, rateLimit.TokenOracleType, rateLimit.TokenPriceId, oracletypes.QuoteUSD)
+	if price == nil || price.IsNil() || !price.IsPositive() {
+		return errors.New("nil oracle price")
 	}
 
-	notional := quantity.Mul(pythPriceState.PriceState.Price)
+	notional := quantity.Mul(*price)
 	if notional.GTE(rateLimit.RateLimitUsd) {
 		return sdkerrors.Wrapf(ErrRateLimitOverflow, "configured limit: %sUSD", rateLimit.RateLimitUsd.String())
 	}

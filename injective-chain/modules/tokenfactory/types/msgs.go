@@ -244,6 +244,10 @@ func (m MsgSetDenomMetadata) ValidateBasic() error {
 		return err
 	}
 
+	if m.Metadata.Decimals > MaxDecimals {
+		return errors.Wrapf(ErrInvalidDenom, "decimals cannot exceed %d", MaxDecimals)
+	}
+
 	if m.Metadata.Base == types.InjectiveCoin {
 		return errors.Wrap(ErrInvalidDenom, "cannot set metadata for INJ")
 	}
