@@ -34,7 +34,9 @@ Ref: https://keepachangelog.com/en/1.1.0/
 
 # Changelog
 
-## [Unreleased] (going to be v1.20.1)
+## [Unreleased]
+
+## [v1.20.1](https://github.com/InjectiveFoundation/injective-core/releases/tag/v1.20.1) - 2026-07-02
 
 ### Features
 
@@ -59,7 +61,6 @@ Ref: https://keepachangelog.com/en/1.1.0/
 ### CLI Breaking
 
 - (peggy)  `create-rate-limit` now requires `[token-oracle-type]`, and `update-rate-limit` now requires `[new-token-oracle-type]`
-
 
 ### API Breaking
 
