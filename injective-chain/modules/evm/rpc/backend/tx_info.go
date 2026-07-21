@@ -144,130 +144,139 @@ func (b *Backend) GetGasUsed(res *chaintypes.TxResult, gas uint64) uint64 {
 
 // GetTransactionReceipt returns the transaction receipt identified by hash.
 func (b *Backend) GetTransactionReceipt(hash common.Hash) (map[string]interface{}, error) {
-	b.logger.Debug("eth_getTransactionReceipt", "hash", hash)
+    b.logger.Debug("eth_getTransactionReceipt", "hash", hash)
 
-	res, err := b.GetTxByEthHash(hash)
-	if err != nil {
-		b.logger.Debug("tx not found", "hash", hash, "error", err.Error())
-		return nil, nil
-	}
-	resBlock, err := b.TendermintBlockByNumber(rpctypes.BlockNumber(res.Height))
-	if err != nil {
-		b.logger.Debug("block not found", "height", res.Height, "error", err.Error())
-		return nil, err
-	}
-	if resBlock == nil {
-		b.logger.Debug("block not found", "height", res.Height)
-		return nil, nil
-	}
+    res, err := b.GetTxByEthHash(hash)
+    if err != nil {
+        b.logger.Debug("tx not found", "hash", hash, "error", err.Error())
+        return nil, nil // 진짜로 없는 트랜잭션일 때만 null
+    }
 
-	tx, err := b.clientCtx.TxConfig.TxDecoder()(resBlock.Block.Txs[res.TxIndex])
-	if err != nil {
-		b.logger.Warn("decoding failed", "error", err.Error())
-		return nil, fmt.Errorf("failed to decode tx: %w", err)
-	}
-	ethMsg := tx.GetMsgs()[res.MsgIndex].(*evmtypes.MsgEthereumTx)
+    resBlock, err := b.TendermintBlockByNumber(rpctypes.BlockNumber(res.Height))
+    if err != nil || resBlock == nil || resBlock.Block == nil {
+        b.logger.Warn("block not found", "height", res.Height, "error", err)
+        return nil, fmt.Errorf("block not found for height %d: %w", res.Height, err)
+    }
 
-	txData := ethMsg.AsTransaction()
-	if txData == nil {
-		b.logger.Error("failed to unpack tx data")
-		return nil, err
-	}
+    // res.TxIndex 범위를 안전하게 검사
+    if int(res.TxIndex) >= len(resBlock.Block.Txs) {
+        b.logger.Error("tx index out of bounds", "txIndex", res.TxIndex, "totalTxs", len(resBlock.Block.Txs))
+        return nil, fmt.Errorf("tx index %d out of bounds", res.TxIndex)
+    }
 
-	cumulativeGasUsed := uint64(0)
-	blockRes, err := b.TendermintBlockResultByNumber(&res.Height)
-	if err != nil {
-		b.logger.Warn("failed to retrieve block results", "height", res.Height, "error", err.Error())
-		return nil, nil
-	}
-	for _, txResult := range blockRes.TxResults[0:res.TxIndex] {
-		cumulativeGasUsed += uint64(txResult.GasUsed)
-	}
-	cumulativeGasUsed += res.CumulativeGasUsed
+    tx, err := b.clientCtx.TxConfig.TxDecoder()(resBlock.Block.Txs[res.TxIndex])
+    if err != nil {
+        b.logger.Warn("decoding failed", "error", err.Error())
+        return nil, fmt.Errorf("failed to decode tx: %w", err)
+    }
 
-	var status hexutil.Uint
-	if res.Failed {
-		status = hexutil.Uint(ethtypes.ReceiptStatusFailed)
-	} else {
-		status = hexutil.Uint(ethtypes.ReceiptStatusSuccessful)
-	}
+    if int(res.MsgIndex) >= len(tx.GetMsgs()) {
+        return nil, fmt.Errorf("msg index %d out of bounds", res.MsgIndex)
+    }
 
-	from, err := ethMsg.GetSenderLegacy(ethtypes.LatestSignerForChainID(b.ChainID().ToInt()))
-	if err != nil {
-		return nil, err
-	}
+    ethMsg, ok := tx.GetMsgs()[res.MsgIndex].(*evmtypes.MsgEthereumTx)
+    if !ok {
+        return nil, errors.New("not an ethereum tx msg")
+    }
 
-	// parse tx logs from events
-	logs, err := evmtypes.DecodeMsgLogs(
-		blockRes.TxResults[res.TxIndex].Data,
-		int(res.MsgIndex),
-		uint64(blockRes.Height),
-	)
-	if err != nil {
-		b.logger.Warn("failed to parse logs", "hash", hash, "error", err.Error())
-	}
+    txData := ethMsg.AsTransaction()
+    if txData == nil {
+        b.logger.Error("failed to unpack tx data")
+        return nil, errors.New("failed to unpack tx data")
+    }
 
-	if res.EthTxIndex == -1 {
-		// Fallback to find tx index by iterating all valid eth transactions
-		msgs := b.EthMsgsFromTendermintBlock(resBlock)
-		for i := range msgs {
-			if msgs[i].Hash() == hash {
-				res.EthTxIndex = int32(i)
-				break
-			}
-		}
-	}
-	// return error if still unable to find the eth tx index
-	if res.EthTxIndex == -1 {
-		return nil, errors.New("can't find index of ethereum tx")
-	}
+    blockRes, err := b.TendermintBlockResultByNumber(&res.Height)
+    if err != nil || blockRes == nil {
+        b.logger.Error("failed to retrieve block results", "height", res.Height, "error", err)
+        return nil, fmt.Errorf("failed to retrieve block result: %w", err)
+    }
 
-	var baseFee *big.Int
-	if txData.Type() == ethtypes.DynamicFeeTxType {
-		baseFee, err = b.BaseFee(blockRes)
-		if err != nil {
-			baseFee = nil
-		}
-	}
+    // Cumulative Gas 계산 시 안전한 인덱싱 적용
+    cumulativeGasUsed := uint64(0)
+    maxTxIndex := int(res.TxIndex)
+    if maxTxIndex > len(blockRes.TxResults) {
+        maxTxIndex = len(blockRes.TxResults)
+    }
 
-	receipt := map[string]interface{}{
-		// Consensus fields: These fields are defined by the Yellow Paper
-		"status":            status,
-		"cumulativeGasUsed": hexutil.Uint64(cumulativeGasUsed),
-		"logsBloom":         ethtypes.BytesToBloom(evmtypes.LogsBloom(logs)),
-		"logs":              logs,
+    for i := 0; i < maxTxIndex; i++ {
+        cumulativeGasUsed += uint64(blockRes.TxResults[i].GasUsed)
+    }
+    cumulativeGasUsed += res.CumulativeGasUsed
 
-		// Implementation fields: These fields are added by geth when processing a transaction.
-		// They are stored in the chain database.
-		"transactionHash": hash,
-		"contractAddress": nil,
-		"gasUsed":         hexutil.Uint64(b.GetGasUsed(res, txData.Gas())),
+    var status hexutil.Uint
+    if res.Failed {
+        status = hexutil.Uint(ethtypes.ReceiptStatusFailed)
+    } else {
+        status = hexutil.Uint(ethtypes.ReceiptStatusSuccessful)
+    }
 
-		// Inclusion information: These fields provide information about the inclusion of the
-		// transaction corresponding to this receipt.
-		"blockHash":        common.BytesToHash(resBlock.Block.Header.Hash()).Hex(),
-		"blockNumber":      hexutil.Uint64(res.Height),
-		"transactionIndex": hexutil.Uint64(res.EthTxIndex),
+    from, err := ethMsg.GetSenderLegacy(ethtypes.LatestSignerForChainID(b.ChainID().ToInt()))
+    if err != nil {
+        b.logger.Warn("failed to derive sender address", "error", err)
+        // 서너 추출 실패 시 0x0 처리 대신 Msg 내의 데이터 활용 시도
+    }
 
-		// https://github.com/foundry-rs/foundry/issues/7640
-		"effectiveGasPrice": (*hexutil.Big)(effectiveGasPrice(txData, baseFee)),
+    // EVM Tx Index 복구 로직 강화
+    if res.EthTxIndex == -1 {
+        msgs := b.EthMsgsFromTendermintBlock(resBlock)
+        for i, m := range msgs {
+            if m.Hash() == hash {
+                res.EthTxIndex = int32(i)
+                break
+            }
+        }
+    }
 
-		// sender and receiver (contract or EOA) addreses
-		"from": from,
-		"to":   txData.To(),
-		"type": hexutil.Uint(ethMsg.AsTransaction().Type()),
-	}
+    // 만약 여전히 -1이라면 BFT 내 MsgIndex 기준으로 Fallback 지정
+    if res.EthTxIndex == -1 {
+        b.logger.Warn("could not determine ethTxIndex, falling back to MsgIndex/TxIndex", "hash", hash)
+        res.EthTxIndex = res.TxIndex 
+    }
 
-	if logs == nil {
-		receipt["logs"] = [][]*ethtypes.Log{}
-	}
+    // parse tx logs from events
+    var logs []*ethtypes.Log
+    if int(res.TxIndex) < len(blockRes.TxResults) {
+        logs, err = evmtypes.DecodeMsgLogs(
+            blockRes.TxResults[res.TxIndex].Data,
+            int(res.MsgIndex),
+            uint64(blockRes.Height),
+        )
+        if err != nil {
+            b.logger.Warn("failed to parse logs", "hash", hash, "error", err.Error())
+            logs = []*ethtypes.Log{}
+        }
+    } else {
+        logs = []*ethtypes.Log{}
+    }
 
-	// If the ContractAddress is 20 0x0 bytes, assume it is not a contract creation
-	if txData.To() == nil {
-		receipt["contractAddress"] = crypto.CreateAddress(from, txData.Nonce())
-	}
+    var baseFee *big.Int
+    if txData.Type() == ethtypes.DynamicFeeTxType {
+        baseFee, _ = b.BaseFee(blockRes)
+    }
 
-	return receipt, nil
+    contractAddress := interface{}(nil)
+    if txData.To() == nil {
+        contractAddress = crypto.CreateAddress(from, txData.Nonce())
+    }
+
+    receipt := map[string]interface{}{
+        "status":            status,
+        "cumulativeGasUsed": hexutil.Uint64(cumulativeGasUsed),
+        "logsBloom":         ethtypes.BytesToBloom(evmtypes.LogsBloom(logs)),
+        "logs":              logs,
+        "transactionHash":   hash,
+        "contractAddress":   contractAddress,
+        "gasUsed":           hexutil.Uint64(b.GetGasUsed(res, txData.Gas())),
+        "blockHash":         common.BytesToHash(resBlock.Block.Header.Hash()).Hex(),
+        "blockNumber":       hexutil.Uint64(res.Height),
+        "transactionIndex":  hexutil.Uint64(res.EthTxIndex),
+        "effectiveGasPrice": (*hexutil.Big)(effectiveGasPrice(txData, baseFee)),
+        "from":              from,
+        "to":                txData.To(),
+        "type":              hexutil.Uint(txData.Type()),
+    }
+
+    return receipt, nil
 }
 
 // GetTransactionByBlockHashAndIndex returns the transaction identified by hash and index.
@@ -315,20 +324,23 @@ func (b *Backend) GetTransactionByBlockNumberAndIndex(blockNum rpctypes.BlockNum
 // TODO: Don't need to convert once hashing is fixed on Tendermint
 // https://github.com/tendermint/tendermint/issues/6539
 func (b *Backend) GetTxByEthHash(hash common.Hash) (*chaintypes.TxResult, error) {
-	if b.indexer != nil {
-		return b.indexer.GetByTxHash(hash)
-	}
+    if b.indexer != nil {
+        res, err := b.indexer.GetByTxHash(hash)
+        if err == nil && res != nil {
+            return res, nil
+        }
+    }
 
-	// fallback to tendermint tx indexer
-	b.logger.Warn("fallback to tendermint tx indexer! failed txns will not be available", "tx", hash.Hex())
-	query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
-	txResult, err := b.queryTendermintTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
-		return txs.GetTxByHash(hash)
-	})
-	if err != nil {
-		return nil, errorsmod.Wrapf(err, "GetTxByEthHash %s", hash.Hex())
-	}
-	return txResult, nil
+    // Indexer 실패 시 Tendermint TxSearch로 Fallback
+    b.logger.Warn("fallback to tendermint tx indexer", "tx", hash.Hex())
+    query := fmt.Sprintf("%s.%s='%s'", evmtypes.TypeMsgEthereumTx, evmtypes.AttributeKeyEthereumTxHash, hash.Hex())
+    txResult, err := b.queryTendermintTxIndexer(query, func(txs *rpctypes.ParsedTxs) *rpctypes.ParsedTx {
+        return txs.GetTxByHash(hash)
+    })
+    if err != nil {
+        return nil, errorsmod.Wrapf(err, "GetTxByEthHash %s", hash.Hex())
+    }
+    return txResult, nil
 }
 
 // GetTxByTxIndex uses `/tx_query` to find transaction by tx index of valid ethereum txs
