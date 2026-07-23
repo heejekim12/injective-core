@@ -1,140 +1,144 @@
 package app
 
 import (
-    "context"
-    "fmt"
+	"context"
+	"fmt"
 
-    "cosmossdk.io/errors"
-    "cosmossdk.io/log"
-    storetypes "cosmossdk.io/store/types"
-    upgradetypes "cosmossdk.io/x/upgrade/types"
-    sdk "github.com/cosmos/cosmos-sdk/types"
-    "github.com/cosmos/cosmos-sdk/types/module"
+	"cosmossdk.io/errors"
+	"cosmossdk.io/log"
+	storetypes "cosmossdk.io/store/types"
+	upgradetypes "cosmossdk.io/x/upgrade/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/module"
 
-    "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades"
-    v1dot20dot0 "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.0"
-    v1dot20dot0beta "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.0-beta"
-    v1dot20dot0beta2 "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.0-beta.2"
-    v1dot20dot1 "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.1"
-    v1dot20dot1beta "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.1-beta"
-    // v1.20.2-beta 임시 패키지 추가
-    v1dot20dot2beta "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.2-beta"
+	"github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades"
+	v1dot20dot0 "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.0"
+	v1dot20dot0beta "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.0-beta"
+	v1dot20dot0beta2 "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.0-beta.2"
+	v1dot20dot1 "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.1"
+	v1dot20dot1beta "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.1-beta"
+	v1dot20dot2beta "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.2-beta"
+	// v1.20.3-beta 패키지 추가
+	v1dot20dot3beta "github.com/InjectiveLabs/injective-core/injective-chain/app/upgrades/v1.20.3-beta"
 )
 
 var _ upgrades.InjectiveApplication = &InjectiveApp{}
 
 var upgradeNames = []string{
-    v1dot20dot0.UpgradeVersion,
-    v1dot20dot0beta.UpgradeVersion,
-    v1dot20dot0beta2.UpgradeVersion,
-    v1dot20dot1beta.UpgradeVersion,
-    v1dot20dot1.UpgradeVersion,
-    v1dot20dot2beta.UpgradeVersion, 
+	v1dot20dot0.UpgradeVersion,
+	v1dot20dot0beta.UpgradeVersion,
+	v1dot20dot0beta2.UpgradeVersion,
+	v1dot20dot1beta.UpgradeVersion,
+	v1dot20dot1.UpgradeVersion,
+	v1dot20dot2beta.UpgradeVersion,
+	v1dot20dot3beta.UpgradeVersion,
 }
 
 var upgradeSteps = map[string]UpgradeStepsFn{
-    v1dot20dot0.UpgradeVersion:      v1dot20dot0.UpgradeSteps,
-    v1dot20dot0beta.UpgradeVersion:  v1dot20dot0beta.UpgradeSteps,
-    v1dot20dot0beta2.UpgradeVersion: v1dot20dot0beta2.UpgradeSteps,
-    v1dot20dot1beta.UpgradeVersion:  v1dot20dot1beta.UpgradeSteps,
-    v1dot20dot1.UpgradeVersion:      v1dot20dot1.UpgradeSteps,
-    v1dot20dot2beta.UpgradeVersion:  v1dot20dot2beta.UpgradeSteps, 
+	v1dot20dot0.UpgradeVersion:      v1dot20dot0.UpgradeSteps,
+	v1dot20dot0beta.UpgradeVersion:  v1dot20dot0beta.UpgradeSteps,
+	v1dot20dot0beta2.UpgradeVersion: v1dot20dot0beta2.UpgradeSteps,
+	v1dot20dot1beta.UpgradeVersion:  v1dot20dot1beta.UpgradeSteps,
+	v1dot20dot1.UpgradeVersion:      v1dot20dot1.UpgradeSteps,
+	v1dot20dot2beta.UpgradeVersion:  v1dot20dot2beta.UpgradeSteps,
+	v1dot20dot3beta.UpgradeVersion:  v1dot20dot3beta.UpgradeSteps,
 }
 
 var storeUpgrades = map[string]storetypes.StoreUpgrades{
-    v1dot20dot0.UpgradeVersion:      v1dot20dot0.StoreUpgrades(),
-    v1dot20dot0beta.UpgradeVersion:  v1dot20dot0beta.StoreUpgrades(),
-    v1dot20dot0beta2.UpgradeVersion: v1dot20dot0beta2.StoreUpgrades(),
-    v1dot20dot1beta.UpgradeVersion:  v1dot20dot1beta.StoreUpgrades(),
-    v1dot20dot1.UpgradeVersion:      v1dot20dot1.StoreUpgrades(),
-    v1dot20dot2beta.UpgradeVersion:  v1dot20dot2beta.StoreUpgrades(), 
+	v1dot20dot0.UpgradeVersion:      v1dot20dot0.StoreUpgrades(),
+	v1dot20dot0beta.UpgradeVersion:  v1dot20dot0beta.StoreUpgrades(),
+	v1dot20dot0beta2.UpgradeVersion: v1dot20dot0beta2.StoreUpgrades(),
+	v1dot20dot1beta.UpgradeVersion:  v1dot20dot1beta.StoreUpgrades(),
+	v1dot20dot1.UpgradeVersion:      v1dot20dot1.StoreUpgrades(),
+	v1dot20dot2beta.UpgradeVersion:  v1dot20dot2beta.StoreUpgrades(),
+	v1dot20dot3beta.UpgradeVersion:  v1dot20dot3beta.StoreUpgrades(),
 }
 
 type UpgradeStepsFn func() []*upgrades.UpgradeHandlerStep
 
 func NoSteps() []*upgrades.UpgradeHandlerStep {
-    return []*upgrades.UpgradeHandlerStep{}
+	return []*upgrades.UpgradeHandlerStep{}
 }
 
 func NoStoreUpgrades() storetypes.StoreUpgrades {
-    return storetypes.StoreUpgrades{
-        Added:   nil,
-        Renamed: nil,
-        Deleted: nil,
-    }
+	return storetypes.StoreUpgrades{
+		Added:   nil,
+		Renamed: nil,
+		Deleted: nil,
+	}
 }
 
 func (app *InjectiveApp) registerUpgradeHandlers() {
-    validUpgradeNames := make(map[string]bool, len(upgradeNames))
+	validUpgradeNames := make(map[string]bool, len(upgradeNames))
 
-    for _, upgradeName := range upgradeNames {
-        if app.UpgradeKeeper.HasHandler(upgradeName) {
-            panic(fmt.Sprintf("Cannot register duplicate upgrade handler '%s'", upgradeName))
-        } else if _, ok := upgradeSteps[upgradeName]; !ok {
-            panic(fmt.Sprintf("Upgrade steps for '%s' not found", upgradeName))
-        } else if _, ok := storeUpgrades[upgradeName]; !ok {
-            panic(fmt.Sprintf("Store upgrades for '%s' not found", upgradeName))
-        }
+	for _, upgradeName := range upgradeNames {
+		if app.UpgradeKeeper.HasHandler(upgradeName) {
+			panic(fmt.Sprintf("Cannot register duplicate upgrade handler '%s'", upgradeName))
+		} else if _, ok := upgradeSteps[upgradeName]; !ok {
+			panic(fmt.Sprintf("Upgrade steps for '%s' not found", upgradeName))
+		} else if _, ok := storeUpgrades[upgradeName]; !ok {
+			panic(fmt.Sprintf("Store upgrades for '%s' not found", upgradeName))
+		}
 
-        validUpgradeNames[upgradeName] = true
+		validUpgradeNames[upgradeName] = true
 
-        app.UpgradeKeeper.SetUpgradeHandler(upgradeName,
-            func(ctx context.Context, upgradeInfo upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
-                sdkCtx := sdk.UnwrapSDKContext(ctx)
+		app.UpgradeKeeper.SetUpgradeHandler(upgradeName,
+			func(ctx context.Context, upgradeInfo upgradetypes.Plan, fromVM module.VersionMap) (module.VersionMap, error) {
+				sdkCtx := sdk.UnwrapSDKContext(ctx)
 
-                upgradeSteps := append(upgradeSteps[upgradeName](),
-                    upgrades.NewUpgradeHandlerStep(
-                        "CONFIGURE POST ONLY MODE HEIGHT THRESHOLD",
-                        upgradeName,
-                        upgrades.MainnetChainID,
-                        configurePostOnlyModeFunction(upgradeInfo),
-                    ),
-                    upgrades.NewUpgradeHandlerStep(
-                        "CONFIGURE POST ONLY MODE HEIGHT THRESHOLD",
-                        upgradeName,
-                        upgrades.TestnetChainID,
-                        configurePostOnlyModeFunction(upgradeInfo),
-                    ),
+				upgradeSteps := append(upgradeSteps[upgradeName](),
+					upgrades.NewUpgradeHandlerStep(
+						"CONFIGURE POST ONLY MODE HEIGHT THRESHOLD",
+						upgradeName,
+						upgrades.MainnetChainID,
+						configurePostOnlyModeFunction(upgradeInfo),
+					),
+					upgrades.NewUpgradeHandlerStep(
+						"CONFIGURE POST ONLY MODE HEIGHT THRESHOLD",
+						upgradeName,
+						upgrades.TestnetChainID,
+						configurePostOnlyModeFunction(upgradeInfo),
+					),
                 )
 
-                for _, step := range upgradeSteps {
-                    if err := step.RunPreventingPanic(sdkCtx, upgradeInfo, app, app.Logger()); err != nil {
-                        return nil, errors.Wrapf(err, "upgrade step %s failed", step.Name)
-                    }
-                }
+				for _, step := range upgradeSteps {
+					if err := step.RunPreventingPanic(sdkCtx, upgradeInfo, app, app.Logger()); err != nil {
+						return nil, errors.Wrapf(err, "upgrade step %s failed", step.Name)
+					}
+				}
 
-                return app.mm.RunMigrations(ctx, app.configurator, fromVM)
-            },
-        )
-    }
+				return app.mm.RunMigrations(ctx, app.configurator, fromVM)
+			},
+		)
+	}
 
-    upgradeInfo, err := app.UpgradeKeeper.ReadUpgradeInfoFromDisk()
-    if err != nil {
-        panic(err)
-    }
+	upgradeInfo, err := app.UpgradeKeeper.ReadUpgradeInfoFromDisk()
+	if err != nil {
+		panic(err)
+	}
 
-    if validUpgradeNames[upgradeInfo.Name] && !app.UpgradeKeeper.IsSkipHeight(upgradeInfo.Height) {
-        storeUpgrades := storeUpgrades[upgradeInfo.Name]
+	if validUpgradeNames[upgradeInfo.Name] && !app.UpgradeKeeper.IsSkipHeight(upgradeInfo.Height) {
+		storeUpgrades := storeUpgrades[upgradeInfo.Name]
 
-        app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
-    }
+		app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
+	}
 }
 
 func configurePostOnlyModeFunction(
-    upgradeInfo upgradetypes.Plan,
+	upgradeInfo upgradetypes.Plan,
 ) func(ctx sdk.Context, app upgrades.InjectiveApplication, logger log.Logger) error {
-    return func(ctx sdk.Context, app upgrades.InjectiveApplication, _ log.Logger) error {
-        keeper := app.GetExchangeKeeper()
-        exchangeParams := keeper.GetParams(ctx)
+	return func(ctx sdk.Context, app upgrades.InjectiveApplication, _ log.Logger) error {
+		keeper := app.GetExchangeKeeper()
+		exchangeParams := keeper.GetParams(ctx)
 
-        blocksAmount := exchangeParams.PostOnlyModeBlocksAmount
-        if blocksAmount == 0 {
-            blocksAmount = 2000
-        }
+		blocksAmount := exchangeParams.PostOnlyModeBlocksAmount
+		if blocksAmount == 0 {
+			blocksAmount = 2000
+		}
 
-        exchangeParams.PostOnlyModeHeightThreshold = upgradeInfo.Height + int64(blocksAmount)
-        keeper.SetParams(ctx, exchangeParams)
+		exchangeParams.PostOnlyModeHeightThreshold = upgradeInfo.Height + int64(blocksAmount)
+		keeper.SetParams(ctx, exchangeParams)
 
-        return nil
-    }
+		return nil
+	}
 }
